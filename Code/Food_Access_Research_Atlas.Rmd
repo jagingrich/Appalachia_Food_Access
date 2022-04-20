@@ -1,0 +1,163 @@
+---
+title: "Food Access Research Atlas Comparison"
+author: "Jared Gingrich"
+date: "4/19/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      warning = F,
+                      message = F)
+
+#Loading packages from the package script
+source("./Scripts/load_pkg.R", local = knitr::knit_global())
+```
+
+This scripts pulls in data from the 2019 USDA Economic Research Service [Food Access Research Atlas](https://www.ers.usda.gov/data-products/food-access-research-atlas/)
+
+* Subsetting the Food Access Research Atlas for Census Tracts in Appalachia
+* Merging with the Food Access Score
+
+```{r}
+#Loading food access research atlas data and food access score data
+fara <- read.csv("./Data/FARA/2019 Food Access Research Atlas Data/Food Access Research Atlas.csv") %>% 
+  mutate(TRACTID = ifelse(nchar(CensusTract) == 10, paste0("0", as.character(CensusTract)), as.character(CensusTract))) %>%
+  dplyr::select(-CensusTract)
+score <- read_sf("./Out/Food_Access_Score.shp", quiet=T)
+
+#merging and subsetting for Appalachian census tracts
+app_fara <- merge(st_drop_geometry(score), fara, by="TRACTID")
+
+#csv output
+write.csv(app_fara, "./Out/Appalachia_FARA.csv")
+```
+
+These scripts compare Appalachia food desert classifications to the categorized Food Access score.
+
+**SI Table 3**: Percent agreement with low-access populations at the four distance thresholds
+
+* Determining the population that lives 0.5, 1, 10, and 20 miles from a store using both distance-to-store methodologies.
+
+```{r}
+#Comparible factors
+  #Low access populations
+SItab3 <- merge(app_fara %>%
+                 mutate_at(vars(lapophalf, lapop1, lapop10, lapop20), as.character) %>%
+                 mutate_at(vars(lapophalf, lapop1, lapop10, lapop20), as.numeric) %>%
+                 dplyr::select(TRACTID, TOT_POP, lapophalf, lapop1, lapop10, lapop20) %>%
+                 pivot_longer(cols=starts_with("lapop"), names_to="Distance", values_to="FDM") %>%
+                 mutate(Distance = gsub("lapop", "", Distance)) %>%
+                 mutate(Distance = ifelse(Distance == "half", "0.5", Distance)),
+               app_fara %>%
+                 dplyr::select(TRACTID, TOT_POP, LApop_05, LApop_1, LApop_10, LApop_20) %>%
+                 pivot_longer(cols=starts_with("LApop"), names_to="Distance", values_to="FAS") %>%
+                 mutate(Distance = gsub("LApop_", "", Distance)) %>%
+                 mutate(Distance = ifelse(Distance == "05", "0.5", Distance))) %>%
+  group_by(Distance) %>%
+  summarize(FDM = sum(FDM, na.rm=T),
+            FAS = sum(FAS, na.rm=T)) %>%
+  mutate(Agreement = round((1-abs(FAS-FDM)/sum(app_fara$TOT_POP, na.rm=T))*100, digits=2),
+         FAS = round(FAS/sum(app_fara$TOT_POP, na.rm=T)*100, digits=2),
+         FDM = round(FDM/sum(app_fara$TOT_POP, na.rm=T)*100, digits=2))
+
+knitr::kable(SItab3, row.names = F)
+```
+
+Food Desert tract and population percents for the US and for Appalachia specifically. 
+
+* Based on the vehicle availability-inclusive definition of food deserts
+* Using the FARA rural-urban classifications
+
+```{r}
+#Food desert counts and percent, for vehicle definition
+fd_stats <- rbind(fara %>%
+                    filter(!is.na(LILATracts_Vehicle)) %>%
+                    summarize(Tracts = "United States",
+                              Total = n(),
+                              Population = sum(Pop2010),
+                              FD = sum(LILATracts_Vehicle == 1),
+                              FD_POP = sum(Pop2010[LILATracts_Vehicle==1])),
+                  app_fara %>%
+                    filter(!is.na(LILATracts_Vehicle)) %>%
+                    summarize(Tracts = "Appalachia",
+                              Total = n(),
+                              Population = sum(Pop2010),
+                              FD = sum(LILATracts_Vehicle == 1),
+                              FD_POP = sum(Pop2010[LILATracts_Vehicle==1])),
+                  app_fara %>%
+                    filter(!is.na(LILATracts_Vehicle)) %>%
+                    group_by(Urban) %>%
+                    summarize(Total = n(),
+                              Population = sum(Pop2010),
+                              FD = sum(LILATracts_Vehicle == 1),
+                              FD_POP = sum(Pop2010[LILATracts_Vehicle==1])) %>%
+                    mutate(Urban = ifelse(Urban == 0, "Rural", "Urban"),
+                           Tracts = paste0(Urban, " Appalachia")) %>%
+                    dplyr::select(-Urban)) %>%
+  mutate(Pct_FD = round(FD/Total*100, digits=2),
+         Pct_FD_POP = round(FD_POP/Population*100, digits=2))
+
+knitr::kable(fd_stats %>%
+               dplyr::select(Tracts, Pct_FD, Pct_FD_POP),
+             row.names = F, col.names = c("Area", "Tracts", "Population"))
+```
+
+**Table 5**: Percentage of tracts and populations with good and poor food access, according to the FAS and the FDM. 
+
+* There is no FDM equivalent of the FAS good access category, so these values are NA
+
+```{r}
+fara_tab <- rbind(app_fara %>%
+  summarize(RURAL = "All Tracts", 
+            APP_TRACTS = n(),
+            APP_POP = sum(TOT_POP, na.rm=T),
+            FDM_Tracts = sum(LILATracts_Vehicle, na.rm=T),
+            FDM_Pop = sum(TOT_POP[LILATracts_Vehicle==1], na.rm=T),
+            FAS_Tracts = sum(FAS1_Cat == "POOR", na.rm=T),
+            FAS_Pop = sum(TOT_POP[FAS1_Cat=="POOR"], na.rm=T)) %>%
+  mutate(Category="Poor",
+         FDM_Tracts = round(FDM_Tracts/6112*100, digits=2),
+         FDM_Pop = round(FDM_Pop/APP_POP*100, digits=2),
+         FAS_Tracts = round(FAS_Tracts/6112*100, digits=2),
+         FAS_Pop = round(FAS_Pop/APP_POP*100, digits=2)),
+  app_fara %>%
+    group_by(RURAL) %>%
+    summarize(APP_POP = sum(TOT_POP, na.rm=T),
+              APP_TRACTS = n(),
+              FDM_Tracts = sum(LILATracts_Vehicle, na.rm=T),
+              FDM_Pop = sum(TOT_POP[LILATracts_Vehicle==1], na.rm=T),
+              FAS_Tracts = sum(FAS1_Cat == "POOR", na.rm=T),
+              FAS_Pop = sum(TOT_POP[FAS1_Cat=="POOR"], na.rm=T)) %>%
+  mutate(Category="Poor",
+         FDM_Tracts = round(FDM_Tracts/APP_TRACTS*100, digits=2),
+         FDM_Pop = round(FDM_Pop/APP_POP*100, digits=2),
+         FAS_Tracts = round(FAS_Tracts/APP_TRACTS*100, digits=2),
+         FAS_Pop = round(FAS_Pop/APP_POP*100, digits=2)),
+  app_fara %>%
+    summarize(RURAL = "All Tracts", 
+            APP_TRACTS = n(),
+            APP_POP = sum(TOT_POP, na.rm=T),
+            FAS_Tracts = sum(FAS1_Cat == "GOOD", na.rm=T),
+            FAS_Pop = sum(TOT_POP[FAS1_Cat=="GOOD"], na.rm=T)) %>%
+  mutate(Category="Good",
+         FDM_Tracts = NA,
+         FDM_Pop = NA,
+         FAS_Tracts = round(FAS_Tracts/6112*100, digits=2),
+         FAS_Pop = round(FAS_Pop/APP_POP*100, digits=2)),
+  app_fara %>%
+    group_by(RURAL) %>%
+    summarize(APP_POP = sum(TOT_POP, na.rm=T),
+              APP_TRACTS = n(),
+              FAS_Tracts = sum(FAS1_Cat == "GOOD", na.rm=T),
+              FAS_Pop = sum(TOT_POP[FAS1_Cat=="GOOD"], na.rm=T)) %>%
+  mutate(Category="Good",
+         FDM_Tracts = NA,
+         FDM_Pop = NA,
+         FAS_Tracts = round(FAS_Tracts/APP_TRACTS*100, digits=2),
+         FAS_Pop = round(FAS_Pop/APP_POP*100, digits=2)))
+
+knitr::kable(fara_tab %>%
+               dplyr::select(RURAL, Category, FDM_Tracts, FDM_Pop, FAS_Tracts, FAS_Pop) %>%
+               arrange(RURAL), row.names = F)
+```

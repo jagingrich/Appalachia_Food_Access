@@ -1,0 +1,967 @@
+---
+title: "Farmers Market Directories"
+author: "Jared Gingrich"
+date: "6/25/2021"
+output: html_document
+---
+
+State Farmers Market Directories
+---
+
+**Packages**
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      warning = F,
+                      message = F,
+                      eval=F)
+
+#Loading packages from the package script
+source("./Scripts/load_pkg.R", local = knitr::knit_global())
+
+#additional text scraping packages
+library(pdftools)
+library(rvest)
+library(webshot)
+```
+
+Scraping each of the state farmers market directories into R and geocoding
+
+* Using geocoding functions in the QGIS MMQGIS plugin
+* Missing coordinates in the geocoder table filled in using Google Maps
+* These cleaning functions worked as of June 2021. They may be outdated as websites have been updated. 
+
+```{r}
+#Pulling names of counties within a 20 mile buffer of Appalachia
+fm_cty <- read.csv("./Data/Farmers_Markets/Farmers_Market_County_Buffer.csv", colClasses = "character")
+```
+
+Alabama
+
+* Data downloaded [here](http://www.fma.alabama.gov/fmcounty.aspx)
+
+```{r}
+#ALABAMA
+#First, a list with county names and websites
+al_cty <- fm_cty %>%
+  filter(STATEFP == "01") %>%
+  arrange(NAME) %>%
+  mutate(NAME = toupper(NAME),
+         NAME = gsub("[. ]", "_", NAME),
+         SOURCE = paste0("http://fma.alabama.gov/mapmarkets.aspx?County=", NAME, "&OrgType=Market"))
+
+#Scrape from the Alabama county farmers market website
+alabama_fm <- function(num){
+  page <- read_html(al_cty$SOURCE[num])
+  txt <- page %>% html_text()
+  txt <- unlist(strsplit(txt, "\t"))
+  txt <- unlist(strsplit(txt, "\r\n"))
+  txt <- trimws(txt, which="both")
+  txt <- txt[txt !=""]
+  bookends <- grep(paste0(" in ", al_cty$NAME[num], " County"), txt, ignore.case = T)
+  if(bookends[length(bookends)]-1 != bookends[1]){
+    subtxt <- txt[bookends[1]:bookends[length(bookends)]]
+    count <- sort(c(grep("Markets in", subtxt, ignore.case = T), grep("Click here for a map of this location", subtxt, ignore.case = T), grep("no map available", subtxt, ignore.case = T)))
+    count <- count[-length(count)]
+    NAME <- subtxt[count+1]
+    STREET <- subtxt[count+2]
+    CITY <- subtxt[count+3]
+    STATE <- subtxt[count+4]
+    ZIP <- ifelse(nchar(subtxt[count+5])==5, subtxt[count+5], NA)
+    DATES <- subtxt[grep("Covered facility", subtxt, ignore.case = T)-1]
+    ctct <- grep("Contact", subtxt, ignore.case = T)
+    CONTACT <- paste0(subtxt[ctct+1], " ", subtxt[ctct+2])
+    PHONE <- subtxt[ctct+3]
+    EMAIL <- ifelse(grepl("Email", subtxt[ctct+4], ignore.case = T)==T, subtxt[ctct+4], "NONE")
+  }
+  if(bookends[length(bookends)]-1 == bookends[1]){
+    NAME <- NA
+    STREET <- NA
+    CITY <- NA
+    STATE <- NA
+    ZIP <- NA
+    DATES <- NA
+    CONTACT <- NA
+    PHONE <- NA
+    EMAIL <- NA
+  }
+  fm_cty <- data.frame(COUNTY=al_cty$NAME[num], NAME, STREET, CITY, STATE, ZIP, DATES, CONTACT, PHONE, EMAIL)
+  return(fm_cty)
+}
+fm_al <- alabama_fm(1)
+for(i in 2:length(al_cty$NAME)){
+  al_new <- alabama_fm(i)
+  fm_al <- rbind(fm_al, al_new)
+}
+fm_al <- fm_al %>%
+  mutate(across(where(is.factor), as.character)) %>%
+  mutate(ADDRESS = paste(paste0(STREET, ","), CITY, STATE, ZIP, sep=" ")) %>%
+  mutate(ADDRESS = ifelse(is.na(NAME), NA, ADDRESS)) %>%
+  mutate(SOURCE = paste0("http://fma.alabama.gov/mapmarkets.aspx?County=", COUNTY, "&OrgType=Market"))
+fm_al <- fm_al %>% filter(!is.na(NAME))
+
+#Saving to run through QGIS geocoder
+write.csv(fm_al, "./Access Data/Farmers Markets/Directories/FM_Directory_AL.csv")
+
+#FIXING ADDRESSES MISSED DURING GEOCODING
+fm_al <- read.csv("./Access Data/Farmers Markets/Directory Geocode/FM_Geocode_AL2.csv") %>% mutate(COORDS = as.character(COORDS))
+fm_al <- fm_al %>% mutate(COORDS = sapply(strsplit(COORDS, "@"), '[[', 2))
+fm_al <- fm_al %>% mutate(LAT = as.numeric(sapply(strsplit(COORDS, ","), '[[', 1)),
+                          LONG = as.numeric(sapply(strsplit(COORDS, ","), '[[', 2)))
+write.csv(fm_al, "./Data/Farmers_Markets/Directory Coords/FM_Coords_AL.csv")
+```
+
+Georgia
+
+* Data downloaded [here](http://www.agr.georgia.gov/community-farmers-markets.aspx)
+
+```{r}
+#GEORGIA
+#First, a list with county names and websites
+ga_cty <- fm_cty %>%
+  filter(STATEFP == "13") %>%
+  arrange(NAME) %>%
+  mutate(COUNTY = toupper(NAME),
+         COUNTY = gsub(" ", "", COUNTY),
+         SOURCE = "http://www.agr.georgia.gov/community-farmers-markets.aspx")
+
+#Scrape from the Georgia county farmers market website
+#to pdf
+webshot("http://www.agr.georgia.gov/community-farmers-markets.aspx", "./Data/Farmers_Markets/GA_FM_Directory.pdf")
+
+#read to R, because it was reading the website inconsistently
+txt <- pdf_text("./Data/Farmers_Markets/GA_FM_Directory.pdf")
+txt <- unlist(strsplit(txt, "Z\n"))
+txt <- txt[-1]
+txt <- gsub("Hours", "\nHours", txt)
+txt <- gsub("Website", "\nWebsite", txt)
+txt <- unlist(strsplit(txt, "\n"))
+txt <- trimws(txt, which='both')
+txt <- txt[txt != ""]
+ctys <- grep(" County$", txt)
+ctys <- ctys[-45]
+ctys <- data.frame(ENTRY = c(1:(length(ctys)+1)), LINE1=c(ctys, length(txt)+1))
+ctys$LINE2 <- c(ctys$LINE1[2:length(ctys$LINE1)]-1, 0)
+ctys <- ctys[-57,]
+ctys <- ctys %>% mutate(COUNTY = txt[LINE1]) %>%
+  filter(LINE2-LINE1 > 1)
+
+#Georgia Scraping function
+ga_scrape <- function(num){
+  cty <- ctys %>% filter(ENTRY == num)
+  subtxt <- txt[cty$LINE1:cty$LINE2]
+  COUNTY = toupper(gsub(" County", "", subtxt[1], ignore.case = T))
+  subtxt <- subtxt[-1]
+  breaks <- unique(c(grep(" market", subtxt, ignore.case = T), grep("market ", subtxt, ignore.case = T), grep("Conyers locally grown", subtxt, ignore.case = T)))
+  not <- c(grep("Location", subtxt, ignore.case = T), grep("Email", subtxt, ignore.case = T), grep("[*]", subtxt, ignore.case = T))
+  breaks <- breaks[!breaks %in% not]
+  names(breaks) <- subtxt[sort(breaks)]
+  breaks <- breaks[names(breaks) != "290 Farmers Market Way"]
+  breaks <- breaks[names(breaks) != "Market Sreet"]
+  NAME <- names(breaks)
+  for(i in breaks){
+    subtxt[i+1] <- ifelse(grepl("GA 3", subtxt[i+1], ignore.case = T), subtxt[i+1], ifelse(grepl("GA, 3", subtxt[i+1], ignore.case = T), subtxt[i+1], paste0(subtxt[i+1], ", ", subtxt[i+2])))
+  }
+  subtxt <- gsub(",,", ",", subtxt)
+  subtxt <- gsub(", ,", ",", subtxt)
+  subtxt <- gsub("Tel:", "Phone:", subtxt)
+  subtxt <- gsub("Trl:", "Phone:", subtxt, ignore.case = F)
+  ADDRESS <- subtxt[breaks+1]
+  
+  #location, hours, contact, etc.
+  breaks2 <- c(breaks, length(subtxt))-1
+  breaks2 <- breaks2[-1]
+  LOCATION <- list()
+  HOURS <- list()
+  PHONE <- list()
+  EMAIL <- list()
+  WEBSITE <- list()
+  FACEBOOK <- list()
+  for(i in 1:(length(breaks))){
+    mkt <- subtxt[breaks[i]:breaks2[i]]
+    dbl <- grep("Hours:", mkt)[grep("Hours:", mkt) %in% grep("Phone:", mkt)]
+    if(length(dbl) != 0){
+      new <- unlist(strsplit(mkt[dbl], " Phone: "))
+      new[2] <- paste0("Phone: ", new[2])
+      mkt <- c(mkt[-dbl], new)
+    }
+    dbl <- grep("Phone:", mkt)[grep("Phone:", mkt) %in% grep("Email:", mkt)]
+    if(length(dbl) != 0){
+      new <- unlist(strsplit(mkt[dbl], " Email: "))
+      new[2] <- paste0("Email: ", new[2])
+      mkt <- c(mkt[-dbl], new)
+    }
+    dbl <- grep("Email:", mkt)[grep("Email:", mkt) %in% grep("Facebook:", mkt)]
+    if(length(dbl) != 0){
+      new <- unlist(strsplit(mkt[dbl], " Facebook: "))
+      new[2] <- paste0("Facebook: ", new[2])
+      mkt <- c(mkt[-dbl], new)
+    }
+    hours <- mkt[grep("Hours", mkt, ignore.case = T)]
+    hours <- ifelse(length(hours)!=0, paste(hours, collapse="; "), "NONE")
+    loc <- mkt[grep("Location", mkt, ignore.case = T)]
+    loc <- ifelse(length(loc)!=0, paste(loc, collapse="; "), "NONE")
+    phone <- mkt[grep("Phone:", mkt, ignore.case = T)]
+    phone <- ifelse(length(phone)!=0, paste(phone, collapse="; "), "NONE")
+    email <- mkt[grep("Email", mkt, ignore.case = T)]
+    email <- ifelse(length(email)!=0, paste(email, collapse="; "), "NONE")
+    web <- mkt[grep("Website", mkt, ignore.case = T)]
+    web <- ifelse(length(web)!=0, paste(web, collapse="; "), "NONE")
+    fb <- mkt[grep("Facebook", mkt, ignore.case = T)]
+    fb <- ifelse(length(fb)!=0, paste(fb, collapse="; "), "NONE")
+    LOCATION[[i]] <- loc
+    HOURS[[i]] <- hours
+    PHONE[[i]] <- phone
+    EMAIL[[i]] <- email
+    WEBSITE[[i]] <- web
+    FACEBOOK[[i]] <- fb
+  }
+
+  #to a data frame
+  fm_ga <- data.frame(COUNTY, NAME, ADDRESS, LOCATION = unlist(LOCATION), HOURS = unlist(HOURS), PHONE = unlist(PHONE), EMAIL=unlist(EMAIL), WEBSITE = unlist(WEBSITE), FACEBOOK = unlist(FACEBOOK))
+  return(fm_ga)
+}
+
+ga_fm <- ga_scrape(ctys$ENTRY[1])
+for(i in 2:length(ctys$ENTRY)){
+  ga_new <- ga_scrape(ctys$ENTRY[i])
+  ga_fm <- rbind(ga_fm, ga_new)
+}
+
+ga_fm <- ga_fm %>% mutate(across(where(is.factor), as.character)) 
+ga_fm <- ga_fm %>%
+  mutate(SOURCE = "http://www.agr.georgia.gov/community-farmers-markets.aspx")
+
+write.csv(ga_fm, "./Access Data/Farmers Markets/Directories/FM_Directory_GA.csv")
+```
+
+Kentucky
+
+* Data downloaded [here](http://www.kyproud.com/kentucky-proud-producers.aspx?type=Farmers%27%20Market)
+* Directory converted to excel document using [Adobe PDF-to-excel](https://www.adobe.com/acrobat/online/pdf-to-excel.html)
+
+```{r}
+#KENTUCKY
+#First, a list with county names and websites
+ky_cty <- fm_cty %>%
+  filter(STATEFP == "21") %>%
+  arrange(NAME) %>%
+  mutate(COUNTY = toupper(NAME),
+         COUNTY = gsub(" ", "", COUNTY),
+         SOURCE = "http://www.kyproud.com/kentucky-proud-producers.aspx?type=Farmers%27%20Market")
+
+#reading in the excel directory
+ky_fm <- read_excel("./Data/Farmers_Markets/KY_FM_Directory.xlsx")
+cols <- as.character(ky_fm[1,])
+cols[c(1,4:6)] <- c("NAME", "LOCATION", "ADDRESS", "DROP")
+colnames(ky_fm) <- cols
+ky_fm <- ky_fm[-1,]
+ky_fm <- ky_fm %>% dplyr::select(-DROP) %>%
+  mutate(EMAIL = gsub(" ", "", EMAIL)) %>%
+  mutate(WEBSITE = gsub(" ", "", WEBSITE)) %>%
+  mutate(COUNTY = gsub(" ", "", COUNTY)) %>%
+  mutate(SOURCE = "http://www.kyproud.com/kentucky-proud-producers.aspx?type=Farmers%27%20Market") %>%
+  mutate(COUNTY = toupper(COUNTY)) 
+
+write.csv(ky_fm, "./Data/Farmers_Markets/Directories/FM_Directory_KY.csv")
+```
+
+Maryland
+
+* Data downloaded [here](https://mda.maryland.gov/maryland_products/Documents/2021-Maryland-Farmers-Market-Directory.pdf)
+
+```{r}
+#MARYLAND
+#First, a list with county names and websites
+md_cty <- fm_cty %>%
+  filter(STATEFP == "24") %>%
+  arrange(NAME) %>%
+  mutate(COUNTY = toupper(NAME),
+         COUNTY = gsub(" ", "", COUNTY),
+         SOURCE = "https://mda.maryland.gov/maryland_products/Documents/2021-Maryland-Farmers-Market-Directory.pdf")
+
+download.file("https://mda.maryland.gov/maryland_products/Documents/2021-Maryland-Farmers-Market-Directory.pdf", "./Data/Farmers_Markets/MD_Directory.pdf", mode="wb")
+
+txt <- pdf_text("./Data/Farmers_Markets/MD_Directory.pdf")
+txt <- unlist(strsplit(txt, "\n"))
+txt <- txt[-c(1:7)]
+ctys <- txt[grep("  ", txt)]
+ctys <- ctys[-c(4, 14, 18, 19, 28)]
+ctys <- trimws(ctys, which="both")
+txt <- trimws(txt, which="both")
+breaks <- txt
+breaks[breaks %in% ctys] <- "COUNTY NAME"
+breaks <- c(grep("COUNTY NAME", breaks), length(breaks)+1)
+names(breaks) <- c(ctys, "END")
+breaks2 <- breaks[2:24]-1
+names(breaks2) <- ctys
+breaks <- breaks[1:23]
+bks <- data.frame(COUNTY = ctys, LINE1 = breaks, LINE2 = breaks2)
+md_cty <- merge(md_cty, bks, by="COUNTY")
+
+scrape_md <- function(county){
+  cty <- md_cty %>% filter(COUNTY == county)
+  subtxt <- txt[cty$LINE1:cty$LINE2]
+  mkts <- grep("MD 2", subtxt, ignore.case = T)-1
+  mkts_end <- length(subtxt)
+  mkts2 <- c(mkts[-1]-1, mkts_end)
+  NAME <- subtxt[mkts]
+  ADDRESS <- subtxt[mkts+1]
+  CONTACT <- list()
+  PHONE <- list()
+  HOURS <- list()
+  EMAIL <- list()
+  WEBSITE <- list()
+  FACEBOOK <- list()
+  for(i in 1:length(mkts)){
+    subsub <-subtxt[mkts[i]:mkts2[i]]
+    fone <- grep("Phone", subsub, ignore.case = T)
+    foneTF <- ifelse(length(fone) == 0, F, T)
+    if(foneTF==T){
+      CONTACT[[i]] <- ifelse(fone >= 5, subsub[fone-1], "NONE")
+      PHONE[[i]] <- subsub[fone]
+      HOURS[[i]] <- ifelse(fone > 5, paste(subsub[3:(fone-2)], collapse="; "), subsub[3])
+    }
+    if(foneTF==F){
+      CONTACT[[i]] <- "NONE"
+      PHONE[[i]] <- "NONE"
+      HOURS[[i]] <- subsub[3]
+    }
+    email <- subsub[grep("Email", subsub, ignore.case = T)]
+    EMAIL[[i]] <- ifelse(length(email)!=0, email, "NONE")
+    web <- subsub[grep("Website", subsub, ignore.case = T)]
+    WEBSITE[[i]] <- ifelse(length(web)!=0, web, "NONE")
+    fb <- subsub[grep("Facebook", subsub, ignore.case = T)]
+    FACEBOOK[[i]] <- ifelse(length(fb)!=0, fb, "NONE")
+  }
+  md_fm <- data.frame(NAME, ADDRESS, HOURS = unlist(HOURS), CONTACT = unlist(CONTACT), PHONE = unlist(PHONE), EMAIL=unlist(EMAIL), WEBSITE = unlist(WEBSITE), FACEBOOK = unlist(FACEBOOK))
+  md_fm <- md_fm %>% mutate(COUNTY = county)
+  return(md_fm)
+}
+
+md_fm <- scrape_md(md_cty$COUNTY[1])
+for (i in 2:length(md_cty$COUNTY)){
+  md_next <- scrape_md(md_cty$COUNTY[i])
+  md_fm <- rbind(md_fm, md_next)
+}
+md_fm <- md_fm %>%
+  mutate(SOURCE = "https://mda.maryland.gov/maryland_products/Documents/2021-Maryland-Farmers-Market-Directory.pdf")
+
+md_fm <- md_fm %>% mutate(across(where(is.factor), as.character)) %>%
+  mutate(ZIP = substr(ADDRESS, nchar(ADDRESS)-4, nchar(ADDRESS)))
+for(i in 1:length(md_fm$NAME)){
+  add <- md_fm$ADDRESS[i]
+  add <- trimws(substr(add, 1, nchar(add)-5), which='both')
+  add <- trimws(unlist(strsplit(add, ",")), which='both')
+  if(length(add) >= 3){
+    md_fm$STATE[i] <- add[length(add)]
+    md_fm$CITY[i] <- add[length(add)-1]
+    md_fm$STREET[i] <- add[length(add)-2]
+  }
+  if(length(add) == 2){
+    md_fm$STATE[i] <- add[2]
+    md_fm$CITY[i] <- add[1]
+    md_fm$STREET[i] <- "NONE"
+  }
+  if(length(add) == 1){
+    md_fm$STATE[i] <- add[1]
+    md_fm$CITY[i] <- "NONE"
+    md_fm$STREET[i] <- "NONE"
+  }
+}
+
+md_fm <- md_fm %>% 
+  dplyr::select(COUNTY, NAME, STREET, CITY, STATE, ZIP, ADDRESS, HOURS, CONTACT, PHONE, EMAIL, WEBSITE, FACEBOOK, SOURCE)
+write.csv(md_fm, "./Data/Farmers_Markets/Directories/FM_Directory_MD.csv")
+```
+
+Mississippi
+
+* Data downloaded [here](https://www.mdac.ms.gov/bureaus-departments/farmers-market/markets-mississippi/)
+
+```{r}
+#MISSISSIPPI
+#First, a list with county names and websites
+ms_cty <- fm_cty %>%
+  filter(STATEFP == "28") %>%
+  arrange(NAME) %>%
+  mutate(COUNTY = toupper(NAME),
+         COUNTY = gsub(" ", "", COUNTY),
+         SOURCE = "https://agnet.mdac.ms.gov/msFarmersMarkets/FarmersMarkets")
+
+all_ctys <- st_drop_geometry(read_sf("./Data/Census//tl_2019_us_county.shp", quiet=T))
+all_ctys <- sort(all_ctys$NAME[all_ctys$STATEFP == "28"])
+
+#ms fm page
+page <- read_html("https://agnet.mdac.ms.gov/msFarmersMarkets/FarmersMarkets")
+
+#mississippi scraping script
+scrape_ms <- function(entry){
+  #NAME
+  name <- page %>% 
+    html_nodes(paste0("#MainContent_ListView_Market_NameLabel_", entry)) %>% 
+    html_text()
+  #HOURS
+  hours <- page %>% 
+    html_nodes(paste0("#MainContent_ListView_Market_Label_HoursOfOperation_", entry)) %>%
+    html_text()
+  closed <- page %>%
+    html_nodes(paste0("#MainContent_ListView_Market_Label_MarketClosed_", entry)) %>%
+    html_text
+  notes <- page %>%
+    html_nodes(paste0("#MainContent_ListView_Market_Label_Notes_", entry)) %>%
+    html_text
+  hours <- c(hours, closed, notes)
+  hours <- paste(hours[hours != ""], collapse = "; ")
+  if(nchar(hours) == 0){hours <- "NONE"}
+  #ADDRESS
+  street <- page %>%
+    html_nodes(paste0("#MainContent_ListView_Market_AddressLabel_", entry)) %>%
+    html_text
+  loc <- page %>%
+    html_nodes(paste0("#MainContent_ListView_Market_Address2Label_", entry)) %>%
+    html_text
+  city <- page %>%
+    html_nodes(paste0("#MainContent_ListView_Market_CityLabel_", entry)) %>%
+    html_text
+  state <- page %>%
+    html_nodes(paste0("#MainContent_ListView_Market_StateLabel_", entry)) %>%
+    html_text
+  zip <- page %>%
+    html_nodes(paste0("#MainContent_ListView_Market_ZipLabel_", entry)) %>%
+    html_text
+  loc <- c(street, loc)
+  loc <- paste(loc[loc != ""], collapse = ", ")
+  if(nchar(loc) == 0){loc <- "NONE"}
+  address <- trimws(paste0(loc, ", ", city, ", ", state, " ", zip), which='both')
+  #PHONE
+  phone <- page %>%
+    html_nodes(paste0("#MainContent_ListView_Market_PhoneLabel_", entry)) %>%
+    html_text
+  if(nchar(phone) == 0){phone <- "NONE"}
+  #WEB
+  web <- page %>%
+    html_nodes(paste0("#MainContent_ListView_Market_HyperLink_WebAddress_", entry)) %>%
+    html_text
+  if(nchar(web) == 0){web <- "NONE"}
+  #FB
+  fb <- page %>%
+    html_nodes(paste0("#MainContent_ListView_Market_HyperLink_socialAddress_", entry)) %>%
+    html_text
+  if(nchar(fb) == 0){fb <- "NONE"}
+  ent <- data.frame(ID = entry, NAME = name, STREET = street, CITY = city, STATE = state, ZIP = zip, LOCATION = loc, ADDRESS = address, HOURS = hours, PHONE = phone, WEBSITE = web, SOCIAL = fb)
+  return(ent)
+}
+
+#running the ms script
+ms_fm <- scrape_ms(1)
+for(i in 2:82){
+  ms_new <- scrape_ms(i)
+  ms_fm <- rbind(ms_fm, ms_new)
+}
+
+ms_fm <- ms_fm %>% mutate(SOURCE = "https://agnet.mdac.ms.gov/msFarmersMarkets/FarmersMarkets")
+write.csv(ms_fm, "./Access Data/Farmers Markets/Directories/FM_Directory_MS.csv")
+```
+
+New Jersey
+
+* Data downloaded [here](https://findjerseyfresh.com/directory/?filter_type_6541f=Community%20Farmers%20Market)
+* While New Jersey is not part of Appalachia, some areas of Appalachia are within 20 miles of New Jersey, and these markets may be accessible to Appalachian communities
+
+```{r}
+#Farmers markets in New Jersey bordering PA
+page <- read_html("./Access Data/Farmers Markets/FM_Directory_NJ.html")
+title <- page %>% html_nodes(".wpgmza_table_title") %>% html_text()
+add <- page %>% html_nodes(".wpgmza_table_address") %>% html_text()
+phone <- page %>% html_nodes(".wpgmza_table_description") %>% html_text()
+nj_fm <- data.frame(NAME = title[2:101], ADDRESS = add[2:101], PHONE = phone[2:101])
+nj_fm <- nj_fm %>% mutate(across(where(is.factor), as.character)) %>%
+  mutate(ADDRESS = trimws(ADDRESS, which='both'))
+nj_fm <- nj_fm %>% mutate(STATE = "New Jersey") %>%
+  mutate(STREET = sapply(strsplit(ADDRESS, ","), `[[`, 1)) %>%
+  mutate(CITY = sapply(strsplit(ADDRESS, ","), `[[`, 2))
+lapply(x, `[[`, 1)
+nj_fm$CITY<- trimws(gsub("New Jersey", "NJ", nj_fm$CITY), which='both')
+nj_fm$CITY[grep("NJ", nj_fm$CITY)] <- "NONE"
+write.csv(nj_fm, "./Data/Farmers_Markets/Directories/FM_Directory_NJ.csv")
+```
+
+New York
+
+* Data downloaded [here](https://agriculture.ny.gov/farmers-markets-county)
+
+```{r}
+#NEW YORK
+#First, a list with county names and websites
+ny_cty <- fm_cty %>%
+  filter(STATEFP == "36") %>%
+  arrange(NAME) %>%
+  mutate(COUNTY = toupper(NAME),
+         COUNTY = gsub(" ", "", COUNTY),
+         SOURCE = paste0("https://agriculture.ny.gov/farmers-markets-county?county=", COUNTY))
+
+#a function for the new york FM websites
+scrape_ny <- function(num){
+  webshot(ny_cty$SOURCE[num], paste0("Access Data/Farmers Markets/NY_Directories/NY_FM_Directory_", ny_cty$COUNTY[num], ".pdf"))
+  txt <- pdf_text(paste0("Access Data/Farmers Markets/NY_Directories/NY_FM_Directory_", ny_cty$COUNTY[num], ".pdf"))
+  txt <- unlist(strsplit(txt, "\n"))
+  txt <- trimws(txt, which="both")
+  txt <- txt[txt !=""]
+  start <- grep(ny_cty$COUNTY[num], txt)
+  txt <- txt[-c(1:start[1], (length(txt)-2):length(txt))]
+  txt <- txt[grep("http", txt, invert = T)]
+  txt <- txt[grep("Accepted", txt, invert=T)]
+  carriage <- (c(1:(length(txt)/4))*4)-3
+  NAME <- txt[carriage]
+  ADDRESS <- txt[carriage+1]
+  HOURS <- paste(txt[carriage+2], txt[carriage+3], sep="; ")
+  ny_fm <- data.frame(COUNTY=toupper(ny_cty$COUNTY[num]), NAME, ADDRESS, HOURS)
+  return(ny_fm)
+}
+ny_fm <- scrape_ny(1)
+for(i in 2:length(ny_cty$COUNTY)){
+  ny_new <- scrape_ny(i)
+  ny_fm <- rbind(ny_fm, ny_new)
+}
+ny_cty <- ny_cty %>%
+  mutate(COUNTY=toupper(COUNTY))
+ny_fm <- merge(ny_fm, ny_cty, by="COUNTY")
+
+ny_fm <- ny_fm %>% mutate(across(where(is.factor), as.character))
+
+write.csv(ny_fm, "./Data/Farmers_Markets/Directories/FM_Directory_NY.csv")
+```
+
+North Carolina
+
+* Data downloaded [here](https://www.ncfarmfresh.com/farmmarkets.asp)
+
+```{r}
+#NORTH CAROLINA
+#First, a list with county names and websites
+nc_cty <- fm_cty %>%
+  filter(STATEFP == "37") %>%
+  arrange(NAME) %>%
+  mutate(COUNTY = toupper(NAME),
+         COUNTY = gsub(" ", "", COUNTY),
+         SOURCE = "https://www.ncfarmfresh.com/farmmarkets.asp")
+
+nc_read <- function(num){
+  page <- read_html(paste0("https://www.ncfarmfresh.com/directory.asp?page=", num, "&product=17&SearchType=farmmarkets&"))
+  txt <- page %>% html_text()
+  txt <- unlist(strsplit(txt, "\t"))
+  txt <- txt[-c(1:154)]
+  txt <- txt[txt != ""]
+  txt <- txt[txt !="\r\n"]
+  txt <- trimws(txt, which="both")
+  txt <- txt[txt !="View Map"]
+  txt <- txt[txt != ""]
+  txt <- txt[-c(grep("you are on page", txt, ignore.case=T):length(txt))]
+  txt <- gsub("View Listing", "", txt)
+  txt <- gsub("Web Site |", "", txt)
+  return(txt)
+}
+
+txt <- nc_read(1)
+for(i in 2:8){
+  txt_nxt <- nc_read(i)
+  txt <- c(txt, txt_nxt)
+}
+
+breaks <- c((1:(length(txt)/2))*2)-1
+bks <- data.frame(NUM=c(length(txt)/2), LINE1=breaks, LINE2=breaks+1)
+
+nc_scrape <- function(num){
+  lst <- txt[bks$LINE1[num]:bks$LINE2[num]]
+  NAME <- lst[1]
+  subtxt <- lst
+  subtxt <- gsub("Home", "\r\n", subtxt)
+  subtxt <- gsub("Office", "\r\n", subtxt)
+  subtxt <- gsub("[|]", "", subtxt)
+  subtxt <- unlist(strsplit(subtxt, "\r\n"))
+  subtxt <- trimws(subtxt, which="both")
+  PHONE <- paste(subtxt[grep("Phone", subtxt, ignore.case = T)], collapse="; ")
+  subtxt <- subtxt[-1]
+  COUNTY <- toupper(subtxt[grep("county$", subtxt, ignore.case = T)])
+  COUNTY <- gsub("COUNTY", "", COUNTY)
+  COUNTY <- substr(COUNTY, 1, nchar(COUNTY)-1)
+  subsub <- subtxt[grep("Phone", subtxt, ignore.case = T, invert=T)]
+  subsub <- subsub[grep("county", subsub, ignore.case = T, invert=T)]
+  ADDRESS <- paste(subsub, collapse=", ")
+  nc_fm <- data.frame(ENTRY=num, COUNTY, NAME, ADDRESS, PHONE)
+  return(nc_fm)
+}
+
+nc_fm <- nc_scrape(1)
+for(i in 2:length(bks$NUM)){
+  nc_new <- nc_scrape(i)
+  nc_fm <- rbind(nc_fm, nc_new)
+}
+nc_fm$COUNTY[grep("Troutman", nc_fm$NAME)] <- "IREDELL" #Because it was listed as NONE
+nc_fm2 <- nc_fm %>% mutate(across(where(is.factor), as.character)) %>%
+  filter(COUNTY %in% nc_cty$COUNTY)
+nc_fm2 <- merge(nc_fm2, nc_cty, by="COUNTY") %>% dplyr::select(-ENTRY)
+
+nc_fm <- nc_fm %>% mutate(across(where(is.factor), as.character)) %>%
+  mutate(ZIP = substr(ADDRESS, nchar(ADDRESS)-4, nchar(ADDRESS)))
+for(i in 1:length(nc_fm$NAME)){
+  add <- nc_fm$ADDRESS[i]
+  add <- trimws(substr(add, 1, nchar(add)-5), which='both')
+  add <- trimws(unlist(strsplit(add, ",")), which='both')
+  if(length(add) >= 3){
+    nc_fm$STATE[i] <- add[length(add)]
+    nc_fm$CITY[i] <- add[length(add)-1]
+    nc_fm$STREET[i] <- add[length(add)-2]
+  }
+  if(length(add) == 2){
+    nc_fm$STATE[i] <- add[2]
+    nc_fm$CITY[i] <- add[1]
+    nc_fm$STREET[i] <- "NONE"
+  }
+  if(length(add) == 1){
+    nc_fm$STATE[i] <- add[1]
+    nc_fm$CITY[i] <- "NONE"
+    nc_fm$STREET[i] <- "NONE"
+  }
+}
+
+nc_fm <- nc_fm %>% mutate(ID = ENTRY) %>% 
+  dplyr::select(ID, COUNTY, NAME, STREET, CITY, STATE, ZIP, ADDRESS, PHONE)
+#write.csv(nc_fm, "./Data/Farmers_Markets/Directories/FM_Directory_NC.csv")
+```
+
+Ohio
+
+* Data downloaded [here](http://ohioproud.org/farm-markets-all/)
+* Data available as a KML/KMZ, no cleaning necessary
+
+Pennsylvania
+
+* Data downloaded [here](https://www.pameals.pa.gov/v6/public/FarmMarketSearch/marketsearch.aspx)
+
+```{r}
+#PENNSYLVANIA
+#First, a list with county names and websites
+pa_cty <- fm_cty %>%
+  filter(STATEFP == "39") %>%
+  arrange(NAME) %>%
+  mutate(COUNTY = toupper(NAME),
+         COUNTY = gsub(" ", "", COUNTY),
+         SOURCE = "https://www.pameals.pa.gov/v6/public/FarmMarketSearch/marketsearch.aspx")
+
+#reading in data
+pa_fm <- read.csv("./Data/Farmers_Markets/Directories/FM_Directory_PA.csv")
+pa_fm <- pa_fm %>% mutate(across(where(is.factor), as.character)) %>%
+  mutate(Street = Address) %>%
+  mutate(Address = paste0(Street, ", ", City, ", ", State, " ", Zip))
+colnames(pa_fm) <- c("ID", "NAME", "ADDRESS", "CITY", "STATE", "ZIP", "COUNTY", "PHONE", "X", "STREET")
+pa_fm <- pa_fm %>% dplyr::select(ID, COUNTY, NAME, STREET, CITY, STATE, ZIP, ADDRESS, PHONE)
+
+write.csv(pa_fm, "./Data/Farmers_Markets/Directories/FM_Directory_PA.csv")
+```
+
+South Carolina
+
+* Data downloaded [here](https://agriculture.sc.gov/where-to-buy-local/community-based-farmers-markets/")
+* Similar SC dept. of AG websites for CSAs and roadside farm stands, not utilized for this investigation
+
+```{r}
+#SOUTH CAROLINA
+#First, a list with county names and websites
+sc_cty <- fm_cty %>%
+  filter(STATEFP == "45") %>%
+  arrange(NAME) %>%
+  mutate(COUNTY = toupper(NAME),
+         COUNTY = gsub(" ", "", COUNTY),
+         SOURCE = "https://agriculture.sc.gov/where-to-buy-local/community-based-farmers-markets/")
+
+#reading in data
+page <- read_html("https://agriculture.sc.gov/where-to-buy-local/community-based-farmers-markets/")
+txt <- page %>% html_text()
+txt <- unlist(strsplit(txt, "\n"))
+txt <- trimws(txt, which="both")
+txt <- txt[txt != ""]
+bookends <- grep("Total: 123 Farmers Markets", txt)
+txt <- txt[-c(1:bookends[1], bookends[2]:length(txt))]
+txt <- gsub("[…]", "", txt)
+txt <- gsub("’", "'", txt)
+name <- txt
+txt2 <- tolower(txt)
+txt2 <- gsub("'", "", txt2)
+txt2 <- gsub("[.]", "", txt2)
+txt2 <- gsub(",", "", txt2)
+txt2 <- gsub("&", "", txt2)
+txt2 <- gsub("–", "", txt2)
+txt2 <- gsub("[(]", "", txt2)
+txt2 <- gsub("[)]", "", txt2)
+txt2 <- gsub(" ", "-", txt2)
+txt2 <- gsub("--", "-", txt2)
+path <- txt2
+
+#individual entries
+path <- paste0("https://agriculture.sc.gov/farmers-markets/", path, "/")
+scrape_sc <- function(num){
+  page <- read_html(path[num])
+  txt <- page %>% html_text()
+  txt <- unlist(strsplit(txt, "\n"))
+  txt <- trimws(txt, which="both")
+  txt <- txt[txt != ""]
+  txt <- txt[-c(1:55)]
+  NAME <- txt[1]
+  CONTACT <- gsub("Contact: ", "", txt[grep("Contact:", txt)])
+  CONTACT <- ifelse(length(CONTACT != 0), CONTACT, "NONE")
+  EMAIL <- gsub("Email: ", "", txt[grep("Email:", txt)])
+  EMAIL <- ifelse(length(EMAIL != 0), EMAIL, "NONE")
+  WEBSITE <- gsub("Website: ", "", txt[grep("Website:", txt)])
+  WEBSITE <- ifelse(length(WEBSITE != 0), WEBSITE, "NONE")
+  COUNTY <- gsub("County: ", "", txt[grep("County:", txt)])
+  address <- grep("Address:", txt)[1]
+  ADDRESS <- gsub("Address: ", "", txt[address])
+  PHONE <- gsub("Phone: ", "", txt[grep("Phone:", txt)])
+  PHONE <- ifelse(length(PHONE != 0), PHONE, "NONE")
+  hours <- gsub("Hours of Operation: ", "", txt[grep("Hours of Operation:", txt)])
+  season <- gsub("Seasons of Operation: ", "", txt[grep("Seasons of Operation:", txt)])
+  HOURS <- paste0(hours, ", ", season)
+  
+  sc_fm <- data.frame(NAME, COUNTY, ADDRESS, HOURS, CONTACT, PHONE, EMAIL, WEBSITE)
+  return(sc_fm)
+}
+
+sc_fm <- scrape_sc(1)
+for(i in 2:length(name)){
+  sc_new <- scrape_sc(i)
+  sc_fm <- rbind(sc_fm, sc_new)
+}
+
+sc_fm <- sc_fm %>%
+  mutate(across(where(is.factor), as.character)) %>%
+  mutate(COUNTY = toupper(COUNTY))
+
+sc_fm <- sc_fm %>% mutate(SOURCE = "https://agriculture.sc.gov/where-to-buy-local/community-based-farmers-markets/", 
+                          TYPE = "Farmers Market")
+write.csv(sc_fm, "./Data/Farmers_Markets/Directories/FM_Directory_SC.csv")
+```
+
+Tennessee
+
+* Data downloaded [here](https://www.picktnproducts.org/listview/farmers-market.html)
+
+```{r}
+#Tennessee
+#First, a list with county names and websites
+tn_cty <- fm_cty %>%
+  filter(STATEFP == "47") %>%
+  arrange(NAME) %>%
+  mutate(COUNTY = toupper(NAME),
+         COUNTY = gsub(" ", "", COUNTY),
+         SOURCE = "https://www.picktnproducts.org/listview/farmers-market.html")
+all_ctys <- st_drop_geometry(read_sf("./Data/Census/tl_2019_us_county.shp", quiet=T))
+all_ctys <- sort(all_ctys$NAME[all_ctys$STATEFP == "47"])
+
+
+page <- read_html("https://www.picktnproducts.org/listview/farmers-market.html")
+txt <- page %>% html_text()
+txt <- unlist(strsplit(txt, "\r\n"))
+txt <- unlist(strsplit(txt, "\n"))
+txt <- trimws(txt, which="both")
+txt <- txt[txt != ""]
+txt <- txt[-c(1:45, 587:598)]
+ctys <- txt[toupper(gsub(" ", "", txt)) %in% toupper(gsub(" ", "",  paste0(all_ctys, " County")))]
+
+breaks <- match(ctys,txt)
+bks <- data.frame(ENTRY = c(1:length(breaks)), COUNTY = txt[breaks], LINE1=breaks, LINE2 = c((breaks[2:length(breaks)])-1, length(txt)))
+
+tn_scrape <- function(num){
+  cty <- bks %>% filter(ENTRY == num)
+  subtxt <- txt[cty$LINE1:cty$LINE2]
+  COUNTY = subtxt[1]
+  subtxt <- subtxt[-1]
+  carriage <- (1:(length(subtxt)/3))*3-2
+  NAME <- subtxt[carriage]
+  ADDRESS <- subtxt[carriage+1]
+  PHONE <- subtxt[grep("-", subtxt)]
+  PHONE <- PHONE[nchar(PHONE) == 12]
+  if(length(PHONE) == 0){PHONE <- "NONE"}
+  fm_tn <- data.frame(COUNTY, NAME, ADDRESS, PHONE)
+  return(fm_tn)
+}
+
+tn_fm <- tn_scrape(bks$ENTRY[1])
+for(i in 2:length(bks$ENTRY)){
+  tn_new <- tn_scrape(bks$ENTRY[i])
+  tn_fm <- rbind(tn_fm, tn_new)
+}
+
+tn_fm2 <- tn_fm %>% mutate(COUNTY = toupper(gsub(" County", "", COUNTY))) %>% 
+  mutate(COUNTY = gsub(" ", "", COUNTY)) %>%
+  filter(COUNTY %in% toupper(tn_cty$COUNTY))
+
+tn_fm <- tn_fm %>% mutate(across(where(is.factor), as.character)) %>%
+  mutate(ZIP = substr(ADDRESS, nchar(ADDRESS)-4, nchar(ADDRESS)))
+for(i in 1:length(tn_fm$NAME)){
+  add <- tn_fm$ADDRESS[i]
+  add <- trimws(substr(add, 1, nchar(add)-5), which='both')
+  add <- trimws(unlist(strsplit(add, ",")), which='both')
+  if(length(add) >= 3){
+    tn_fm$STATE[i] <- add[length(add)]
+    tn_fm$CITY[i] <- add[length(add)-1]
+    tn_fm$STREET[i] <- add[length(add)-2]
+  }
+  if(length(add) == 2){
+    tn_fm$STATE[i] <- add[2]
+    tn_fm$CITY[i] <- add[1]
+    tn_fm$STREET[i] <- "NONE"
+  }
+  if(length(add) == 1){
+    tn_fm$STATE[i] <- add[1]
+    tn_fm$CITY[i] <- "NONE"
+    tn_fm$STREET[i] <- "NONE"
+  }
+}
+tn_fm$ID <- c(1:nrow(tn_fm))
+tn_fm <- tn_fm %>% dplyr::select(ID, COUNTY, NAME, STREET, CITY, STATE, ZIP, ADDRESS, PHONE)
+write.csv(tn_fm, "./Data/Farmers_Markets/Directories/FM_Directory_TN.csv")
+```
+
+Virginia
+
+* Data downloaded [here](http://vagrown.va-vdacs.com/default.aspx?market_type=%27RFM%27%2c+%27WFM%27&keyword=Product+Name+%2f+Description&location=City+or+Zipcode&submit.x=64&submit.y=20)
+
+```{r}
+#VIRGINIA
+#First, a list of county names and websites
+va_cty <- fm_cty %>%
+  filter(STATEFP == "51") %>%
+  arrange(NAME) %>%
+  mutate(COUNTY = toupper(NAME),
+         COUNTY = gsub(" ", "", COUNTY),
+         SOURCE = "http://vagrown.va-vdacs.com/default.aspx?market_type=%27RFM%27%2c+%27WFM%27&keyword=Product+Name+%2f+Description&location=City+or+Zipcode&submit.x=64&submit.y=20")
+
+#reading in data
+page <- read_html("./Data/Markets/VA_FM_Directory.html")
+links <- page %>% html_nodes("a") %>% html_attr("href")
+
+vafm_scrape <- function(link){
+  txt <- read_html(links[link]) %>% html_text()
+  txt <- unlist(strsplit(txt, "\r\n"))
+  txt <- trimws(txt, which="both")
+  txt <- txt[txt !=""]
+  txt <- txt[-c(1:136)]
+  NAME <- txt[1]
+  STREET <- txt[4]
+  brk <- ifelse(nchar(txt[5]) == 1, 5, 6)
+  LOCATION <- ifelse(brk==6, txt[5], "NONE")
+  CITY <- txt[brk+1]
+  STATE <- txt[brk+2]
+  ZIP <- txt[brk+3]
+  contact <- txt[brk+4]
+  contact <- gsub("Phone:", "xxPhone:", contact)
+  contact <- gsub("E-mail:", "xxEmail:", contact)
+  contact <- gsub("Web site:", "xxWebsite:", contact)
+  contact <- gsub("Products:", "xxProducts:", contact)
+  contact <- gsub("Days & Hours:", "xxDays & Hours:", contact)
+  contact <- gsub("Activities & Events:", "xxActivities & Events:", contact)
+  contact <- unlist(strsplit(contact, "xx"))
+  CONTACT <- contact[grep("Contact:", contact)]
+  CONTACT <- ifelse(length(CONTACT)!=0, CONTACT, "NONE")
+  PHONE <- contact[grep("Phone:", contact)]
+  PHONE <- ifelse(length(PHONE)!=0, PHONE, "NONE")
+  EMAIL <- contact[grep("Email:", contact)]
+  EMAIL <- ifelse(length(EMAIL)!=0, EMAIL, "NONE")
+  WEB <- contact[grep("Website:", contact)]
+  WEB <- ifelse(length(WEB)!=0, WEB, "NONE")
+  HOURS <- contact[grep("Hours:", contact)]
+  HOURS <- ifelse(length(HOURS)!=0, HOURS, "NONE")
+  ADDRESS <- paste0(STREET, ", ", CITY, ", ", STATE, " ", ZIP)
+  vafm <- data.frame(NAME, LOCATION, STREET, CITY, STATE, ZIP, ADDRESS, CONTACT, PHONE, EMAIL, WEB, HOURS)
+  return(vafm)
+}
+
+#running the scraping script
+vafm_tbl <- vafm_scrape(1)
+for (i in 2:length(links)){
+  vafm_nxt <- vafm_scrape(i)
+  vafm_tbl <- rbind(vafm_tbl, vafm_nxt)
+}
+
+vafm_tbl2 <- distinct(vafm_tbl) %>%
+  mutate(across(where(is.factor), as.character))
+vafm_tbl2 <- cbind(data.frame(c(1:nrow(vafm_tbl2))), vafm_tbl2)
+colnames(vafm_tbl2)[1] <- "ID"
+write.csv(vafm_tbl2, "./Data/Farmers_Markets/Directories/FM_Directory_VA.csv")
+```
+
+West Virginia
+
+* Data downloaded [here](https://agriculture.wv.gov/divisions/regulatory-and-environmental-affairs/farmers-market/)
+
+```{r}
+#WEST VIRGINIA
+#First, a list with county names and websites
+wv_cty <- fm_cty %>%
+  filter(STATEFP == "54") %>%
+  arrange(NAME) %>%
+  mutate(COUNTY = toupper(NAME),
+         COUNTY = gsub(" ", "", COUNTY),
+         SOURCE = "https://agriculture.wv.gov/divisions/regulatory-and-environmental-affairs/farmers-market/")
+
+#reading in data
+links <-character()
+for(i in 1:7){
+  page <- read_html(paste0("https://farmfreshwv.com/wv-markets/page/", i, "/"))
+  links_new <- page %>% html_nodes("a") %>% html_attr("href")
+  links_new <- links_new[grep("wv-markets", links_new)]
+  links_new <- links_new[-grep("category|page", links_new)]
+  links_new <- links_new[grep("http", links_new)]
+  links_new <- unique(links_new)
+  links <- c(links, links_new)
+}
+
+wv_scrape <- function(link){
+  page <- read_html(links[link]) 
+  NAME <- page %>% html_node(".elementor-heading-title") %>% html_text()
+  ADDRESS <- page %>% html_node(".geodir-field-address") %>% html_text()
+  HOURS <- page %>% html_nodes(".gd-bh-days-list") %>% html_text()
+  HOURS <- HOURS[-grep("Closed", HOURS)]
+  HOURS2 <- page %>% html_node(".elementor-clearfix") %>% html_text()
+  HOURS2 <- gsub("\t", "", HOURS2)
+  HOURS2 <- gsub("\n", "", HOURS2)
+  HOURS2 <- gsub("Open", "", HOURS2)
+  HOURS <- paste0(paste(HOURS, collapse="; "), HOURS2)
+  wvfm <- data.frame(NAME, ADDRESS, HOURS)
+}
+wv_fm <- wv_scrape(1)
+for(i in 2:length(links)){
+  wv_new <- wv_scrape(i)
+  wv_fm <- rbind(wv_fm, wv_new)
+}
+wv_fm <- wv_fm %>% filter(NAME != "All WV Markets  Locations")
+wv_fm <- wv_fm %>% 
+  mutate(across(where(is.factor), as.character)) %>%
+  mutate(ZIP = substr(ADDRESS, nchar(ADDRESS)-4, nchar(ADDRESS)))
+for(i in 1:length(wv_fm$NAME)){
+  add <- wv_fm$ADDRESS[i]
+  add <- trimws(substr(add, 1, nchar(add)-5), which='both')
+  add <- trimws(unlist(strsplit(add, ",")), which='both')
+  if(length(add) >= 3){
+    wv_fm$STATE[i] <- add[length(add)]
+    wv_fm$CITY[i] <- add[length(add)-1]
+    wv_fm$STREET[i] <- add[length(add)-2]
+  }
+  if(length(add) == 2){
+    wv_fm$STATE[i] <- add[2]
+    wv_fm$CITY[i] <- add[1]
+    wv_fm$STREET[i] <- "NONE"
+  }
+  if(length(add) == 1){
+    wv_fm$STATE[i] <- add[1]
+    wv_fm$CITY[i] <- "NONE"
+    wv_fm$STREET[i] <- "NONE"
+  }
+}
+wv_fm$ID <- c(1:nrow(wv_fm))
+wv_fm <- wv_fm %>% dplyr::select(ID, NAME, STREET, CITY, STATE, ZIP, ADDRESS, HOURS)
+write.csv(wv_fm, "./Data/Farmers_Markets/Directories/FM_Directory_WV.csv")
+```
+

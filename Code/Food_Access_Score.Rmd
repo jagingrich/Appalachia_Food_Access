@@ -1,0 +1,167 @@
+---
+title: "Food Access Score"
+author: "Jared Gingrich"
+date: "4/16/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      warning = F,
+                      message = F)
+
+#Loading packages from the package script
+source("./Scripts/load_pkg.R", local = knitr::knit_global())
+```
+
+This scripts calculates the Food Access Score for census tracts in Appalachia. This is an additive model of food access, based on distance-to-store, median household income, and percent of households with no vehicles. Three replications of the Food Access Score are computed.
+
+* Large grocery stores
+* All grocery stores
+* All grocery stores and farmers markets
+
+In addition to the raw Food Access Score values, this script also groups the Food Access Score, based on the large grocery stores replication. 
+
+* Binned scores according to standard deviation from mean
+* Categorized scores according to criteria for ERS food deserts, creating Good, Average, and Poor food access groupings.
+
+```{r}
+#loading individual Indicator of Access tables and joining
+#Appalachian census tract shapefile
+app_tract <- read_sf("./Out/SHPs/Appalachia_Tracts.shp", quiet=T) %>%
+  mutate(TRACTID = GEOID) %>%
+  dplyr::select(TRACTID, PctRURAL, RURAL)
+
+#Distance-to-store
+app_dist <- read.csv("./Out/Indicators_of_access/Appalachia_Tract_Distances.csv") %>%
+  mutate(TRACTID = ifelse(nchar(TRACTID) == 10, paste0("0", as.character(TRACTID)), as.character(TRACTID)))
+
+#Median household income
+app_mhi <- read.csv("./Out/Indicators_of_access/MHI_RPP_Adjusted.csv") %>%
+  mutate(MHI = RelMHI2,
+         TRACTID = ifelse(nchar(TractID) == 10, paste0("0", as.character(TractID)), as.character(TractID))) %>%
+  dplyr::select(-TractID)
+
+#Vehicles
+app_vehs <- read.csv("./Out/Indicators_of_access/Vehicle_Tract.csv") %>%
+  mutate(TRACTID = ifelse(nchar(GEOID) == 10, paste0("0", as.character(GEOID)), as.character(GEOID))) %>%
+  dplyr::select(-GEOID)
+
+#MERGING
+score <- merge(app_tract, app_dist, by="TRACTID")
+score <- merge(score, app_mhi, by="TRACTID")
+score <- merge(score, app_vehs, by="TRACTID")
+
+#Fixing PCT_HUNV when population is 0, removing old index columns, fixing FIPS
+score <- score %>%
+  mutate(FIPS = ifelse(nchar(FIPS) == 4, paste0("0", as.character(FIPS)), as.character(FIPS))) %>%
+  dplyr::select(-c(starts_with("X"), Tot_HH, wRelMHI, RelMHI, RelMHIFix, RelMHI2, TOTAL_HH, TOTAL_HUNV)) %>%
+  mutate(PCT_HUNV = ifelse(TOT_POP == 0, NA, PCT_HUNV))
+
+us_mhi <- read.csv("./Out/Indicators_of_Access/US_MHI_RPP_Adjusted.csv")
+us_vehs <- read.csv("./Out/Indicators_of_access/US_Vehicle_Tract.csv")
+
+#Z-score transform each variable
+score <- score %>%
+#Large_Dist
+  mutate(zLargeDst = -(Large_Dist-mean(Large_Dist, na.rm=T))/sd(Large_Dist, na.rm=T)) %>%
+#Groc_Dist
+  mutate(zGrocDst = -(Groc_Dist-mean(Large_Dist, na.rm=T))/sd(Large_Dist, na.rm=T)) %>%
+#GrocFMDist
+  mutate(zGrocFMDst = -(GrocFMDist-mean(Large_Dist, na.rm=T))/sd(Large_Dist, na.rm=T)) %>%
+#MHI
+  mutate(zRelMHI = (MHI-mean(MHI, na.rm=T))/sd(MHI, na.rm=T)) %>%
+#PCT_HUNV
+  mutate(zPCT_HUNV = -(PCT_HUNV-mean(PCT_HUNV, na.rm=T))/sd(PCT_HUNV, na.rm=T))
+
+#Calculating Index
+score <- score %>% 
+  mutate(FAS1 = zLargeDst+zRelMHI+zPCT_HUNV) %>%
+  mutate(FAS2 = zGrocDst+zRelMHI+zPCT_HUNV) %>% 
+  mutate(FAS3 = zGrocFMDst+zRelMHI+zPCT_HUNV) %>%
+  dplyr::select(-starts_with("z"))
+
+#Average food access score for the US
+#Average distance-to-store: 2.19 miles
+dist_us <- -(2.19-mean(score$Large_Dist, na.rm=T))/sd(score$Large_Dist, na.rm=T)
+econ_us <- (mean(us_mhi$RelMHI2, na.rm=T)-mean(score$MHI, na.rm=T))/sd(score$MHI, na.rm=T)
+vehs_us <- -(mean(us_vehs$PCT_HUNV, na.rm=T)-mean(score$PCT_HUNV, na.rm=T))/sd(score$PCT_HUNV, na.rm=T)
+
+us_fas <- dist_us + econ_us + vehs_us
+
+#Thresholds based on food desert criteria
+dist_z <- -(0.5-mean(score$Large_Dist, na.rm=T))/sd(score$Large_Dist, na.rm=T)
+econ_z <- (0.8-mean(score$MHI, na.rm=T))/sd(score$MHI, na.rm=T)
+pct <- quantile(us_vehs %>%
+                  filter(!is.na(PCT_HUNV)) %>%
+                  pull(PCT_HUNV), 0.8)
+vehs_z <- -(pct-mean(score$PCT_HUNV, na.rm=T))/sd(score$PCT_HUNV, na.rm=T)
+threshold_lower <- dist_z + econ_z + vehs_z
+threshold_upper <- (us_fas-threshold_lower)+us_fas
+
+#adding appalachia FIPS
+score <- score %>%
+  mutate(FIPS = ifelse(FIPS == "51520", "51191", FIPS)) %>% #Bristol City
+  mutate(FIPS = ifelse(FIPS == "51530", "51163", FIPS)) %>% #Buena Vista City
+  mutate(FIPS = ifelse(FIPS == "51580", "51005", FIPS)) %>% #Covington City
+  mutate(FIPS = ifelse(FIPS == "51640", "51035", FIPS)) %>% #Galax City
+  mutate(FIPS = ifelse(FIPS == "51678", "51163", FIPS)) %>% #Lexington City
+  mutate(FIPS = ifelse(FIPS == "51690", "51089", FIPS)) %>% #Martinsville City
+  mutate(FIPS = ifelse(FIPS == "51720", "51195", FIPS)) %>% #Norton City
+  mutate(FIPS = ifelse(FIPS == "51750", "51121", FIPS)) #Radford City 
+
+#categorical classification: binned by SD
+b_bin <- c(min(score$FAS1, na.rm=T)-2, 
+           mean(score$FAS1, na.rm=T)-2*sd(score$FAS1, na.rm=T),
+           mean(score$FAS1, na.rm=T)-sd(score$FAS1, na.rm=T),
+           mean(score$FAS1, na.rm=T),
+           mean(score$FAS1, na.rm=T)+sd(score$FAS1, na.rm=T), 
+           mean(score$FAS1, na.rm=T)+2*sd(score$FAS1, na.rm=T),
+           max(score$FAS1, na.rm=T)+2)
+
+labs <- c("< -2 SD", "-2 SD", "-1 SD", "+1 SD", "+2 SD", "> +2 SD")
+
+score <- score %>%
+  mutate(FAS1_Bin = cut(FAS1, 
+                       breaks = b_bin,
+                       labels = labs, 
+                       include.lowest = T))
+
+#Categorical classification: poor access break at threshold corresponding to the food access score of the food desert criteria
+b_rel <- sort(c(min(score$FAS1, na.rm=T)-2, 
+           threshold_lower,
+           threshold_upper,
+           max(score$FAS1, na.rm=T)+2))
+
+score <- score %>%
+  mutate(FAS1_Cat = cut(FAS1, 
+                       breaks = b_rel,
+                       labels = c("POOR", "AVERAGE", "GOOD"), 
+                       include.lowest = T))
+
+write_sf(score, "./Out/Food_Access_Score.shp", quiet=T)
+```
+
+**Table 4**: Food Access Score distribution in the rural and urban portions of Appalachia. Grouping census tracts and population by standard deviation from mean. Compares to **Figure 3**.
+
+```{r}
+fas_tab <- merge(st_drop_geometry(score) %>%
+        filter(!is.na(FAS1)) %>%
+        group_by(FAS1_Bin) %>%
+        group_by(RURAL, .add=T) %>%
+        summarize(Tracts = n(),
+                  TOT_POP = sum(TOT_POP)) %>%
+        ungroup(),
+      st_drop_geometry(score) %>%
+        filter(!is.na(FAS1)) %>%
+        group_by(RURAL) %>%
+        summarize(Total_Tract = n(),
+                  Total_Pop = sum(TOT_POP)) %>%
+        ungroup(),
+      by="RURAL") %>%
+  mutate(Population = paste0(round(TOT_POP/Total_Pop*100, digits=2), "%")) %>%
+  dplyr::select(-starts_with("Total"), -TOT_POP) %>%
+  pivot_wider(id_cols = c(FAS1_Bin), names_from=RURAL, values_from=c(Tracts, Population))
+
+knitr::kable(fas_tab[c(5,2,1,3,4,6),], align="r")
+```

@@ -1,0 +1,522 @@
+---
+title: "Indicators of Access"
+author: "Jared Gingrich"
+date: "4/10/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      warning = F,
+                      message = F)
+
+#Loading packages from the package script
+source("./Scripts/load_pkg.R", local = knitr::knit_global())
+
+#Loading script for the ACS 5 year estimate data function
+source("./Scripts/acs5y.R", local = knitr::knit_global())
+```
+
+# Distance-to-Store
+
+This script joins store locations from the SNAP retailer database to the historic SNAP retailer database.
+
+* SNAP retailer database has the most up-to-date information, historic SNAP database has store classifications.
+* SNAP retailer database downloaded [here](https://usda-fns.hub.arcgis.com/datasets/USDA-FNS::snap-store-locations?geometry=124.057%2C-9.799%2C-153.326%2C74.211).
+* Historic SNAP retailer database downloaded [here](https://www.fns.usda.gov/snap/retailer/historicaldata).
+
+```{r}
+#Joining stores with Retailer Policy and Management table store categorizations
+
+stores <- read_sf("./Data/Distance-to-Store/Appalachia_Store_Locations.shp", quiet=T)
+hist <- st_drop_geometry(read_sf("./Data/Distance-to-Store/Historical SNAP Retailer Locator.shp", quiet=T))
+
+st_hist <- merge(st_drop_geometry(stores) %>%
+                   mutate(Latitude = round(Latitude, digits=4),
+                          Longitude = round(Longitude, digits=4)), hist %>%
+                   mutate(Latitude = round(as.numeric(Latitude), digits=4),
+                          Longitude = round(as.numeric(Longitude), digits=4),
+                          End_Year = sapply(strsplit(End.Date, "/"), '[', 3)) %>%
+                   dplyr::select(Store.Name, Latitude, Longitude, Store.Type, End_Year), 
+                 by.x=c("Latitude", "Longitude"),
+                 by.y=c("Latitude", "Longitude"))
+st_hist <- st_hist %>%
+  mutate(End_Year = ifelse(is.na(End_Year), 2021, End_Year)) %>%
+  group_by(ObjectId) %>%
+  mutate(Max_End_Year = max(End_Year)) %>%
+  ungroup() %>%
+  filter(End_Year == Max_End_Year) %>%
+  group_by(ObjectId) %>%
+  summarize(Count=n(),
+            Store_Name = unique(Store_Name),
+            TYPE = unique(TYPE),
+            Store_Type = paste(unique(Store.Type), collapse=";"),
+            Store_Type2 = paste(sort(unique(Store.Type[End_Year == Max_End_Year])), collapse=";"))
+
+st_groc <- st_hist %>%
+  filter(TYPE == "Grocery") %>%
+  mutate(Type1 = sapply(strsplit(Store_Type2, ";"), '[', 1),
+         Type2 = sapply(strsplit(Store_Type2, ";"), '[', 2),
+         Type3 = sapply(strsplit(Store_Type2, ";"), '[', 3)) %>%
+  mutate(Store_Type = ifelse(Type1 %in% c("Supermarket", "Super Store", "Large Grocery Store"), "Grocery", NA),
+         Store_Type = ifelse(Type2 %in% c("Supermarket", "Super Store", "Large Grocery Store"), "Grocery", Store_Type),
+         Store_Type = ifelse(Type3 %in% c("Supermarket", "Super Store", "Large Grocery Store"), "Grocery", Store_Type),
+         Store_Type = ifelse(is.na(Store_Type), "Other", "Grocery"))
+
+stores <- merge(stores %>%
+                  filter(TYPE == "Grocery"), 
+                st_groc %>%
+                  dplyr::select(ObjectId, Store_Type), by="ObjectId", all=T)
+missing <- stores %>%
+  filter(is.na(Store_Type))
+missing <- merge(missing %>%
+                   mutate(Latitude = round(Latitude, digits=5),
+                          Longitude = round(Longitude, digits=5)), 
+                 hist %>%
+                   mutate(Latitude = as.numeric(Latitude),
+                          Longitude = as.numeric(Longitude),
+                          End_Year = sapply(strsplit(End.Date, "/"), '[', 3)) %>%
+                   dplyr::select(Store.Name, Latitude, Longitude, Store.Type, End_Year),
+                 by=c("Latitude", "Longitude"))
+missing <- st_drop_geometry(missing) %>%
+  mutate(End_Year = ifelse(is.na(End_Year), 2021, End_Year)) %>%
+  group_by(ObjectId) %>%
+  mutate(Max_End_Year = max(End_Year)) %>%
+  ungroup() %>%
+  filter(End_Year == Max_End_Year) %>%
+  group_by(ObjectId) %>%
+  summarize(Count=n(),
+            Store_Name = unique(Store_Name),
+            TYPE = unique(TYPE),
+            Store_Type = paste(unique(Store.Type), collapse=";"),
+            Store_Type2 = paste(sort(unique(Store.Type[End_Year == Max_End_Year])), collapse=";"))
+missing <- missing %>%
+  filter(TYPE == "Grocery") %>%
+  mutate(Type1 = sapply(strsplit(Store_Type2, ";"), '[', 1),
+         Type2 = sapply(strsplit(Store_Type2, ";"), '[', 2),
+         Type3 = sapply(strsplit(Store_Type2, ";"), '[', 3)) %>%
+  mutate(Store_Type = ifelse(Type1 %in% c("Supermarket", "Super Store", "Large Grocery Store"), "Grocery", NA),
+         Store_Type = ifelse(Type2 %in% c("Supermarket", "Super Store", "Large Grocery Store"), "Grocery", Store_Type),
+         Store_Type = ifelse(Type3 %in% c("Supermarket", "Super Store", "Large Grocery Store"), "Grocery", Store_Type),
+         Store_Type = ifelse(is.na(Store_Type), "Other", "Grocery"))
+stores <- merge(stores,
+                missing %>%
+                  mutate(Store_Type_missing = Store_Type) %>%
+                  dplyr::select(ObjectId, Store_Type_missing), by="ObjectId", all=T)
+stores <- stores %>%
+  mutate(Store_Type = ifelse(is.na(Store_Type), Store_Type_missing, Store_Type))
+
+missing <- stores %>%
+  filter(is.na(Store_Type))
+
+missing <- merge(missing %>%
+                   mutate(Address2 = tolower(Address)), 
+                 hist %>%
+                   mutate(Address2 = tolower(paste0(Street.Num, " ", Street.Nam)),
+                          End_Year = sapply(strsplit(End.Date, "/"), '[', 3)) %>%
+                   dplyr::select(Store.Name, Address2, Zip.Code, Store.Type, End_Year),
+                 by.x=c("Zip5", "Address2"), by.y=c("Zip.Code", "Address2"))
+missing <- st_drop_geometry(missing) %>%
+  mutate(End_Year = ifelse(is.na(End_Year), 2021, End_Year)) %>%
+  group_by(ObjectId) %>%
+  mutate(Max_End_Year = max(End_Year)) %>%
+  ungroup() %>%
+  filter(End_Year == Max_End_Year) %>%
+  group_by(ObjectId) %>%
+  summarize(Count=n(),
+            Store_Name = unique(Store_Name),
+            TYPE = unique(TYPE),
+            Store_Type = paste(unique(Store.Type), collapse=";"),
+            Store_Type2 = paste(sort(unique(Store.Type[End_Year == Max_End_Year])), collapse=";"))
+missing <- missing %>%
+  filter(TYPE == "Grocery") %>%
+  mutate(Type1 = sapply(strsplit(Store_Type2, ";"), '[', 1),
+         Type2 = sapply(strsplit(Store_Type2, ";"), '[', 2),
+         Type3 = sapply(strsplit(Store_Type2, ";"), '[', 3)) %>%
+  mutate(Store_Type = ifelse(Type1 %in% c("Supermarket", "Super Store", "Large Grocery Store"), "Grocery", NA),
+         Store_Type = ifelse(Type2 %in% c("Supermarket", "Super Store", "Large Grocery Store"), "Grocery", Store_Type),
+         Store_Type = ifelse(Type3 %in% c("Supermarket", "Super Store", "Large Grocery Store"), "Grocery", Store_Type),
+         Store_Type = ifelse(is.na(Store_Type), "Other", "Grocery"))
+stores <- merge(stores %>%
+                  dplyr::select(-Store_Type_missing),
+                missing %>%
+                  mutate(Store_Type_missing = Store_Type) %>%
+                  dplyr::select(ObjectId, Store_Type_missing), by="ObjectId", all=T)
+stores <- stores %>%
+  mutate(Store_Type = ifelse(is.na(Store_Type), Store_Type_missing, Store_Type))
+
+stores <- stores %>%
+  dplyr::select(-Store_Type_missing)
+
+missing <- stores %>%
+  filter(is.na(Store_Type))
+#Remaining 31 for manual fixing
+write_sf(stores, "./Data/Distance-to-Store/Appalachia_Store_Grocery.shp", quiet=T)
+```
+
+This script calculates the distance-to-store indicator of access (distance to the nearest store) at the census tract level.
+
+* Distances to the nearest store for census blocks split along a regular 500-meter-square grid were computed in QGIS, using the Distance to Nearest Hub tool. 
+* Distances are computed three times, using the locations of only large grocery stores, all grocery stores, and grocery stores and farmers markets. 
+* Census block shapefiles with population and housing counts downloaded [here](https://www2.census.gov/geo/tiger/TIGER2010BLKPOPHU/).
+
+```{r}
+#aggregating from the rectangular grid to the census blocks
+grid <- read.csv("./Data/Distance-to-Store/Grid_Store_Distances.csv")
+grid <- grid %>%
+  mutate(BLOCKID = ifelse(nchar(as.character(BLOCKID10)) == 14, paste0("0", as.character(BLOCKID10)), as.character(BLOCKID10))) %>%
+  mutate(FIPS = substr(BLOCKID, 1, 5))
+
+#calculating closest grocery or farmers market distance
+grid <- grid %>%
+  mutate(GrocFMDist = ifelse(Groc_Dist <= FM_Dist, Groc_Dist, FM_Dist))
+
+#as always, fixing the Virginia city-county discrepancies
+grid <- grid %>%
+  mutate(FIPS = ifelse(FIPS == "51520", "51191", FIPS)) %>% #Bristol City
+  mutate(FIPS = ifelse(FIPS == "51530", "51163", FIPS)) %>% #Buena Vista City
+  mutate(FIPS = ifelse(FIPS == "51580", "51005", FIPS)) %>% #Covington City
+  mutate(FIPS = ifelse(FIPS == "51640", "51035", FIPS)) %>% #Galax City
+  mutate(FIPS = ifelse(FIPS == "51678", "51163", FIPS)) %>% #Lexington City
+  mutate(FIPS = ifelse(FIPS == "51690", "51089", FIPS)) %>% #Martinsville City
+  mutate(FIPS = ifelse(FIPS == "51720", "51195", FIPS)) %>% #Norton City
+  mutate(FIPS = ifelse(FIPS == "51750", "51121", FIPS)) #Radford City
+
+#dropping non-Appalachia edge block fragments
+appalachia <- read_excel("./Data/Subregions_2009_Data-1.xls", sheet = 1, skip=3)
+grid <- grid %>% filter(FIPS %in% appalachia$FIPS)
+
+#FARA Low Access Populations
+grid <- grid %>%
+  mutate(LApop_05 = ifelse(Large_Dist > 0.5, SPLIT_POP, 0),
+         LApop_1 = ifelse(Large_Dist > 1, SPLIT_POP, 0),
+         LApop_10 = ifelse(Large_Dist > 10, SPLIT_POP, 0),
+         LApop_20 = ifelse(Large_Dist > 20, SPLIT_POP, 0))
+
+#Aggregating grid squares to census blocks
+app_block <- grid %>%
+  group_by(BLOCKID) %>%
+  summarize(POP = mean(POP10),
+            Large_Dist = ifelse(POP != 0, sum(SPLIT_POP*Large_Dist)/POP, 0),
+            Groc_Dist = ifelse(POP != 0, sum(SPLIT_POP*Groc_Dist)/POP, 0),
+            GrocFMDist = ifelse(POP != 0, sum(SPLIT_POP*GrocFMDist)/POP, 0),
+            LApop_05 = round(sum(LApop_05)),
+            LApop_1 = round(sum(LApop_1)),
+            LApop_10 = round(sum(LApop_10)),
+            LApop_20 = round(sum(LApop_20)))
+
+#Aggregating census blocks to census tracts
+#and fixing FIPS codes for Virginia County-City combinations
+app_tract <- app_block %>%
+  mutate(TRACTID = substr(BLOCKID, 1, 11)) %>%
+  mutate(FIPS = substr(BLOCKID, 1, 5)) %>%
+  mutate(FIPS = ifelse(FIPS == "51520", "51191", FIPS)) %>% #Bristol City
+  mutate(FIPS = ifelse(FIPS == "51530", "51163", FIPS)) %>% #Buena Vista City
+  mutate(FIPS = ifelse(FIPS == "51580", "51005", FIPS)) %>% #Covington City
+  mutate(FIPS = ifelse(FIPS == "51640", "51035", FIPS)) %>% #Galax City
+  mutate(FIPS = ifelse(FIPS == "51678", "51163", FIPS)) %>% #Lexington City
+  mutate(FIPS = ifelse(FIPS == "51690", "51089", FIPS)) %>% #Martinsville City
+  mutate(FIPS = ifelse(FIPS == "51720", "51195", FIPS)) %>% #Norton City
+  mutate(FIPS = ifelse(FIPS == "51750", "51121", FIPS)) %>% #Radford City
+  group_by(TRACTID) %>%
+  summarize(TOT_POP = sum(POP),
+            Large_Dist = sum(Large_Dist*POP, na.rm=T)/TOT_POP,
+            Groc_Dist = sum(Groc_Dist*POP, na.rm=T)/TOT_POP,
+            GrocFMDist = sum(GrocFMDist*POP, na.rm=T)/TOT_POP,
+            LApop_05 = sum(LApop_05), 
+            LApop_1 = sum(LApop_1),
+            LApop_10 = sum(LApop_10),
+            LApop_20 = sum(LApop_20))
+
+write.csv(app_tract, "./Out/Indicators_of_access/Appalachia_Tract_Distances.csv")
+```
+
+# Economic- Median Household Income
+
+This script calculates Median Household Income at the census tract level, as a proportion of US Median Household Income and adjusted for the Bureau of Economic Regional Purchasing Parities. Median incomes for different household sizes are calculated and averaged to account for household structure, similar to the calculation of poverty rates for different household categories. Some census tract median household incomes are redacted, and these missing values are replaced by the corresponding county-level Median Household Income proportions. Two tables are returned, one for Appalachian census tracts alone, one for all US census tracts.
+
+American Community Survey, 2015-2019 estimates
+
+* ACS Table B19019: Median household income by household size
+* ACS Table B11016: Household type and size
+* ACS Table B01003: Population
+
+Bureau of Economic Analysis
+
+* Metropolitan Area Regional Price Parities (MARPP)
+* Portion Area Regional Price Parities (MARPP)
+
+```{r}
+#Determining county-level regional price parities
+#Metropolitan statistical area counties
+msa <- read_excel("./Data/Economic/list1_2020.xls", skip = 2)
+colnames(msa) <- c("CBSA_FIPS", "Metro_Div", "CSA_Code", "CBSA_Title", "Met_Mic", "Div_Title", "CSA_Title", "COUNTY", "STATE", "ST_FIPS", "CTY_FIPS", "COUNTY_CAT")
+msa <- msa %>%
+  filter(Met_Mic == "Metropolitan Statistical Area",
+         STATE != "Puerto Rico") %>%
+  mutate(FIPS = paste0(ST_FIPS, CTY_FIPS)) %>%
+  dplyr::select(FIPS, ST_FIPS, CTY_FIPS, COUNTY, STATE, CBSA_FIPS, CBSA_Title)
+
+#Metropolitan statistical area price parities
+marpp <- read.csv("./Data/Economic/MARPP/MARPP_MSA_2008_2019.csv")
+marpp <- marpp %>%
+  mutate(across(where(is.factor), as.character)) %>%
+  dplyr::select(GeoFIPS, GeoName, Description, Unit, X2018) %>%
+  mutate(GeoFIPS = trimws(GeoFIPS, which="both")) %>%
+  filter(!is.na(X2018),
+         GeoFIPS != "00999")
+colnames(marpp)[5] <- "RPP"
+marpp <- marpp %>%
+  mutate(RPP = as.numeric(RPP))
+
+#joining marpp to county
+marpp <- merge(msa, marpp, by.x="CBSA_FIPS", by.y="GeoFIPS")
+marpp <- marpp %>%
+  dplyr::select(FIPS, COUNTY, STATE, Description, Unit, RPP)
+
+#Portion area regional price parities
+parpp <- read.csv("./Data/Economic/PARPP/PARPP_PORT_2008_2019.csv")
+parpp <- parpp %>%
+  dplyr::select(GeoFIPS, GeoName, Description, Unit, X2018) %>%
+  mutate(GeoFIPS = as.character(GeoFIPS)) %>%
+  mutate(GeoFIPS = trimws(GeoFIPS, which="both")) %>%
+  mutate(ST_FIPS = substr(GeoFIPS, 1, 2)) %>%
+  filter(!is.na(X2018),
+         GeoName %in% parpp$GeoName[grep("Nonmetro", parpp$GeoName)])
+colnames(parpp)[5] <- "RPP"
+parpp <- parpp %>%
+  mutate(RPP = as.numeric(RPP))
+
+#Nonmetropolitan Counties
+cty <- st_drop_geometry(read_sf("./Data/Census/tl_2019_us_county.shp", quiet=T))
+parpp <- merge(cty %>%
+                 filter(!GEOID %in% marpp$FIPS,
+                        STATEFP %in% unique(msa$ST_FIPS)) %>%
+                 dplyr::select(GEOID, NAME, NAMELSAD, STATEFP), parpp, by.x="STATEFP", by.y="ST_FIPS") 
+parpp <- parpp %>%
+  mutate(across(where(is.factor), as.character)) %>%
+  mutate(GeoName = str_replace(GeoName, " \\(Nonmetropolitan Portion\\)", "")) %>%
+  dplyr::select(GEOID, NAMELSAD, GeoName, Description, Unit, RPP)
+colnames(parpp) <- colnames(marpp)
+
+#All counties join
+rpp <- bind_rows(marpp, parpp) %>%
+  mutate(Description = trimws(Description, which="both"))
+write.csv("./Data/Economic/Regional Price Parities.csv")
+
+#Median household income, 2019
+#County Level
+st_all <- st_drop_geometry(read_sf("./Data/Census/cb_2019_us_state_20m.shp", quiet=T)) %>%
+  filter(!NAME %in% c("Puerto Rico"))
+
+mhi_cty <- list()
+for (i in sort(unique(st_all$NAME))){
+  mhi_cty[[i]] <- acs5y(2019, state = i, cenunit = "County", table = "B19019") 
+}
+mhi_cty <- bind_rows(mhi_cty)
+mhi_cty <- mhi_cty %>% mutate(FIPS = substr(GEOID, 8, 12))
+
+mhi_cols <- acs5y(2019, table="B19019")
+mhi_cty <- mhi_cty %>%
+  pivot_longer(cols = starts_with("B19"), names_to="TableID", values_to="MHI")
+mhi_cty <- merge(mhi_cty, mhi_cols, by="TableID")
+mhi_cty <- mhi_cty %>%
+  mutate(TableTitle = gsub("-", " ", TableTitle))
+
+#HH type and size
+hh_cty <- list()
+for (i in sort(unique(st_all$NAME))[16:51]){
+  hh_cty[[i]] <- acs5y(2019, state = i, cenunit = "County", table = "B11016") 
+}
+hh_cty <- bind_rows(hh_cty)
+hh_cty <- hh_cty %>% mutate(FIPS = substr(GEOID, 8, 12))
+
+hh_cols <- acs5y(2019, table="B11016")
+hh_cty <- hh_cty %>%
+  pivot_longer(cols = starts_with("B11"), names_to="TableID", values_to="HH_Size")
+hh_cty <- merge(hh_cty, hh_cols, by="TableID")
+hh_cty <- hh_cty %>%
+  filter(TableTitle != "Total:") %>%
+  mutate(TableTitle = paste0(gsub("-", " ", TableTitle), "s"),
+         TableTitle = ifelse(TableTitle %in% c("Family households:s", "Nonfamily households:s"), "Total:", TableTitle),
+         HH_Type = ifelse(TableID %in% c("B11016_002", "B11016_003", "B11016_004", "B11016_005", "B11016_006", "B11016_007", "B11016_008"), "Fam_HH", "Nonfam_HH")) %>%
+  pivot_wider(id_cols = -c(TableID, HH_Type, HH_Size), names_from=HH_Type, values_from=HH_Size)%>%
+  mutate(Fam_HH = ifelse(is.na(Fam_HH), 0, Fam_HH),
+         Tot_HH = Fam_HH + Nonfam_HH)
+
+#joining MHI and households
+mhi_cty <- merge(hh_cty %>%
+                  dplyr::select(FIPS, TableTitle, Tot_HH, Fam_HH, Nonfam_HH),
+                mhi_cty %>%
+                  dplyr::select(FIPS, TableTitle, MHI),
+                by=c("FIPS", "TableTitle"))
+
+#Loading US MHI
+us_mhi <- read.csv("./Data/Economic/US_MHI.csv") %>%
+  mutate(across(where(is.factor), as.character))
+colnames(us_mhi) <- c("TableTitle", "US_MHI", "MOE")
+us_mhi <- us_mhi %>%
+  mutate(TableTitle = ifelse(TableTitle != "Total:", substr(gsub("-", " ", TableTitle), 5, nchar(TableTitle)), "Total:"),
+         US_MHI = as.numeric(gsub(",", "", US_MHI)))
+
+#joining with US MHI
+mhi_cty <- merge(mhi_cty, us_mhi %>%
+                  dplyr::select(-MOE),
+                by="TableTitle")
+
+#joining with regional price parities
+mhi_cty <- merge(mhi_cty, 
+                rpp %>%
+                  filter(Description == "RPPs: Goods") %>%
+                  mutate(RPP = RPP/100) %>%
+                  dplyr::select(-Unit),
+                by="FIPS") %>%
+  mutate(MHI_ADJ = MHI/RPP)
+
+mhi_fix <- mhi_cty %>%
+  filter(TableTitle != "Total:",
+         !is.na(MHI_ADJ)) %>%
+  mutate(RelMHI = MHI_ADJ/US_MHI) %>%
+  mutate(wRelMHI = RelMHI*Tot_HH) %>%
+  group_by(FIPS) %>%
+  summarise(Tot_HH = sum(Tot_HH),
+            wRelMHI = sum(wRelMHI)) %>%
+  ungroup() %>%
+  mutate(RelMHIFix = wRelMHI/Tot_HH)
+
+#Median household income, 2019
+#Tract Level
+mhi <- list()
+for (i in sort(unique(st_all$NAME))[36]){
+  mhi[[i]] <- acs5y(2019, state = i, cenunit = "Tract", table = "B19019") 
+}
+mhi <- bind_rows(mhi)
+mhi <- mhi %>% mutate(TractID = substr(GEOID, 8, 18))
+
+mhi_cols <- acs5y(2019, table="B19019")
+mhi <- mhi %>%
+  pivot_longer(cols = starts_with("B19"), names_to="TableID", values_to="MHI")
+mhi <- merge(mhi, mhi_cols, by="TableID")
+mhi <- mhi %>%
+  mutate(TableTitle = gsub("-", " ", TableTitle))
+
+#HH type and size
+hh <- list()
+for (i in sort(unique(st_all$NAME))){
+  hh[[i]] <- acs5y(2019, state = i, cenunit = "Tract", table = "B11016") 
+}
+hh <- bind_rows(hh)
+hh <- hh %>% mutate(TractID = substr(GEOID, 8, 18))
+hh_cols <- acs5y(2019, table="B11016")
+hh <- hh %>%
+  pivot_longer(cols = starts_with("B11"), names_to="TableID", values_to="HH_Size")
+hh <- merge(hh, hh_cols, by="TableID")
+hh <- hh %>%
+  filter(TableTitle != "Total:") %>%
+  mutate(TableTitle = paste0(gsub("-", " ", TableTitle), "s"),
+         TableTitle = ifelse(TableTitle %in% c("Family households:s", "Nonfamily households:s"), "Total:", TableTitle),
+         HH_Type = ifelse(TableID %in% c("B11016_002", "B11016_003", "B11016_004", "B11016_005", "B11016_006", "B11016_007", "B11016_008"), "Fam_HH", "Nonfam_HH")) %>%
+  pivot_wider(id_cols = -c(TableID, HH_Type, HH_Size), names_from=HH_Type, values_from=HH_Size)%>%
+  mutate(Fam_HH = ifelse(is.na(Fam_HH), 0, Fam_HH),
+         Tot_HH = Fam_HH + Nonfam_HH)
+
+#joining MHI and households
+mhi_hh <- merge(hh %>%
+                  dplyr::select(TractID, TableTitle, Tot_HH, Fam_HH, Nonfam_HH),
+                mhi %>%
+                  dplyr::select(TractID, TableTitle, MHI),
+                by=c("TractID", "TableTitle"))
+
+#joining with US MHI
+mhi_hh <- merge(mhi_hh, us_mhi %>%
+                  dplyr::select(-MOE),
+                by="TableTitle")
+
+#joining with regional price parities
+mhi_hh <- merge(mhi_hh %>%
+                  mutate(FIPS = substr(TractID, 1, 5)), 
+                rpp %>%
+                  filter(Description == "RPPs: Goods") %>%
+                  mutate(RPP = RPP/100) %>%
+                  dplyr::select(-Unit),
+                by="FIPS") %>%
+  mutate(MHI_ADJ = MHI/RPP)
+
+mhi2 <- mhi_hh %>%
+  filter(TableTitle != "Total:") %>%
+  mutate(RelMHI = MHI_ADJ/US_MHI) %>%
+  mutate(wRelMHI = RelMHI*Tot_HH) %>%
+  group_by(TractID) %>%
+  summarise(Tot_HH = sum(Tot_HH, na.rm=T),
+            wRelMHI = sum(wRelMHI, na.rm=T)) %>%
+  ungroup() %>%
+  mutate(RelMHI = wRelMHI/Tot_HH)
+
+#joining to tract population counts
+pop  <- list()
+for (i in sort(unique(st_all$NAME))){
+  pop[[i]] <- acs5y(2019, state = i, cenunit = "Tract", table = "B01003") 
+}
+pop <- bind_rows(pop)
+pop <- pop %>% mutate(TractID = substr(GEOID, 8, 18))
+pop <- pop %>%
+  mutate(TOT_POP = B01003_001) %>%
+  dplyr::select(TractID, TOT_POP)
+
+mhi2 <- merge(mhi2, pop %>%
+                  dplyr::select(TractID, TOT_POP), by="TractID", all=T)
+
+#Replacing missing mhi with county mhi
+mhi2 <- merge(mhi2 %>%
+                mutate(FIPS = substr(TractID, 1, 5)),
+              mhi_fix %>%
+                dplyr::select(FIPS, RelMHIFix), 
+              by="FIPS", all=T)
+mhi2 <- mhi2 %>%             
+  mutate(RelMHI2 = ifelse(TOT_POP != 0 & is.na(RelMHI), RelMHIFix, RelMHI)) %>%
+  dplyr::select(-TOT_POP)
+
+write.csv(mhi2, "./Out/Indicators_of_access/US_MHI_RPP_Adjusted.csv")
+
+#subsetting for Appalachian census tracts
+app_tract <- st_drop_geometry(read_sf("./Out/SHPs/Appalachia_Tracts.shp"))
+mhi2 <- mhi2 %>% 
+  dplyr::select(-X) %>%
+  mutate(TractID = ifelse(nchar(TractID) == 10, paste0("0", as.character(TractID)), as.character(TractID))) %>%
+  filter(TractID %in% app_tract$GEOID)
+write.csv(mhi2, "./Out/Indicators_of_access/MHI_RPP_Adjusted.csv")
+```
+
+# Vehicle- Percent of Households with No Vehicles
+
+This script calculates household vehicle availability at the census tract level. Two tables are returned, one for Appalachian census tracts alone, one for all US census tracts.
+
+American Community Survey, 2015-2019 estimates
+
+* ACS Table B08201_001: Total households
+* ACS Table B08201_002: Households with no vehicles
+
+```{r}
+st_all <- st_drop_geometry(read_sf("./Access Data/Appalachia Census SHPs/State TL 2019/cb_2019_us_state_20m.shp", quiet=T)) %>%
+  filter(!NAME %in% c("Puerto Rico"))
+
+vehs <- list()
+for (i in sort(unique(st_all$NAME))){
+  vehs[[i]] <- acs5y(2019, state = i, cenunit = "Tract", table = "B08201") 
+}
+
+vehs <- bind_rows(vehs)
+vehs <- vehs %>% mutate(GEOID = substr(GEOID, 8, 18)) %>% 
+  dplyr::select(GEOID, B08201_001, B08201_002) 
+colnames(vehs) <- c("GEOID", "TOTAL_HH", "TOTAL_HUNV")
+vehs <- vehs %>%
+  mutate(PCT_HUNV = ifelse(TOTAL_HH !=0, TOTAL_HUNV/TOTAL_HH*100, NA))
+
+write_csv(vehs, "./Out/Indicators_of_access/US_Vehicle_Tract.csv")
+
+#subsetting for Appalachian census tracts
+app_tract <- st_drop_geometry(read_sf("./Out/SHPs/Appalachia_Tracts.shp"))
+vehs <- vehs %>% 
+  filter(GEOID %in% app_tract$GEOID)
+write.csv(vehs, "./Out/Indicators_of_access/Vehicle_Tract.csv")
+```

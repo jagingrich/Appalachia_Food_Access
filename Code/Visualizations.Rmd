@@ -1,0 +1,301 @@
+---
+title: "Visualizations"
+author: "Jared Gingrich"
+date: "4/19/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      warning = F,
+                      message = F)
+
+#Loading packages from the package script
+source("./Scripts/load_pkg.R", local = knitr::knit_global())
+```
+
+Loading data and shapefiles for visualizations
+
+```{r}
+score <- read_sf("./Out/Food_Access_Score.shp", quiet=T)
+state <- read_sf("./Out/SHPS/States.shp", quiet=T)
+app_state <- state %>% filter(Appalachia == 1)
+appalachia <- st_union(score, by_feature = F)
+us_mhi <- read.csv("./Out/Indicators_of_Access/US_MHI_RPP_Adjusted.csv")
+us_vehs <- read.csv("./Out/Indicators_of_access/US_Vehicle_Tract.csv")
+app_fara <- read.csv("./Out/Appalachia_FARA.csv")
+```
+
+# Main Figures
+
+**Figure 1**: Appalachia, showing rural and urban census tracts.
+
+```{r}
+#bounding box for inset map
+app_bb = st_as_sfc(st_bbox(app_state))
+
+#inset map
+us <- ggplot() +
+  geom_sf(data=state, fill="transparent", color="black", lwd=0.5) +
+  geom_sf(data=appalachia, fill="grey50", color="transparent", lwd=0) +
+  geom_sf(data=app_bb, fill="transparent", color="#d7191c", lwd=1) +
+  scale_fill_manual(values=c("#31a354", "grey75")) + 
+  theme_void() +
+  theme(legend.position = "NONE")
+
+#main map: Appalachia
+app <- ggplot() +
+  geom_sf(data=score %>%
+            filter(!is.na(RURAL)),
+          aes(fill=RURAL), color="transparent", lwd=0) +
+  geom_sf(data=app_state, fill="transparent", color="black", lwd=0.5) +
+  labs(fill="") +
+  scale_fill_manual(values=c("#31a354", "grey75")) +
+  theme_void() +
+  theme(legend.position = c(0.85, 0.15))
+
+#arranging main and inset maps
+fig1 = ggdraw() +
+  draw_plot(app) +
+  draw_plot(us, x = 0.05, y = 0.65, width = 0.4, height = 0.4)
+
+#save
+ggsave(plot=fig1, filename="./Visualizations/Figure1.jpg", width=4, height=4, units="in")
+```
+
+**Figure 2**: Food Access Score distribution for large grocery stores alone. 
+
+```{r}
+#Average food access score for the US
+#Average distance-to-store: 2.19 miles
+dist_us <- -(2.19-mean(score$Large_Dist, na.rm=T))/sd(score$Large_Dist, na.rm=T)
+econ_us <- (mean(us_mhi$RelMHI2, na.rm=T)-mean(score$MHI, na.rm=T))/sd(score$MHI, na.rm=T)
+vehs_us <- -(mean(us_vehs$PCT_HUNV, na.rm=T)-mean(score$PCT_HUNV, na.rm=T))/sd(score$PCT_HUNV, na.rm=T)
+
+us_fas <- dist_us + econ_us + vehs_us
+
+fig2 <- ggplot(score %>% filter(!is.na(FAS1))) +
+  geom_histogram(aes(x=FAS1, fill=RURAL), show.legend=F) +
+  geom_vline(aes(xintercept = us_fas, color="US average Food\nAccess Score"), lwd=1) +
+  facet_wrap(vars(RURAL), ncol=1) +
+  scale_fill_manual(values=c("#31a354", "grey75")) +
+  scale_color_manual(values=c("red")) +
+  theme_bw() +
+  theme(axis.text.y = element_text(angle=45, hjust=1)) +
+  scale_y_continuous(limits=c(0, 600), breaks = c(0, 250, 500)) +
+  labs(x="Food Access Score",
+       y="Frequency",
+       color="") +
+  theme(legend.position = "bottom")
+
+ggsave(plot=fig2, "./Visualizations/Figure2.jpg", width=6.5, height=3.5, units="in")
+```
+
+**Figure 3**: Food Access Score binned by standard deviation from mean. Compare to **Table 4**.
+
+```{r}
+order <- data.frame(Order = c(1,2,3,4,5,6), FAS1_Bin = c("< -2 SD", "-2 SD", "-1 SD", "+1 SD", "+2 SD", "> +2 SD"))
+
+fig3 <- ggplot(merge(score %>% filter(!is.na(FAS1_Bin)), order, by="FAS1_Bin")) +
+  geom_sf(aes(fill=reorder(FAS1_Bin, Order)), color="transparent", lwd=0) +
+  geom_sf(data=app_state, fill="transparent", color="grey45", lwd=0.25) +
+  scale_fill_brewer(palette="PuOr") +
+  theme_void() +
+  labs(fill="") +
+  theme(legend.position = c(0.98, 0.25))
+
+ggsave(plot=fig3, filename="./Visualizations/Figure3.jpg", width=4.5, height=4, units="in")
+```
+
+**Figure 4**: Food Access Score replication boxplots. Showing distribution of the FAS for large grocery stores alone, all grocery stores, and all grocery stores and farmers markets.
+
+```{r}
+fas_plot <- st_drop_geometry(score) %>%
+  dplyr::select(c(TRACTID, RURAL, starts_with("FAS"), -ends_with("DIFF"), -ends_with("Cat"), -ends_with("Bin"))) %>%
+  pivot_longer(cols=starts_with("FAS"), names_to="Iter", values_to="FAS")
+
+fig4 <- ggplot(fas_plot %>% filter(!is.na(FAS))) +
+  geom_boxplot(aes(x=reorder(Iter, desc(Iter)), y=FAS, fill=RURAL), show.legend = F,
+               outlier.alpha = 0.5) +
+  scale_fill_manual(values = c("#31a354", "grey75")) +
+  scale_x_discrete(labels = c("Grocery stores and\nfarmers markets", "All grocery\nstores", "Large grocery\nstores alone")) +
+  facet_wrap(vars(RURAL), nrow=2) +
+  coord_flip() +
+  theme_bw() +
+  labs(x="",
+       y="Food Access Score")
+
+ggsave(plot=fig4, filename="./Visualizations/Figure4.jpg", width=6.5, height=3.5, units="in")
+```
+
+**Figure 5**: Indicators of access and poor access classifications for the Food Access Score and the Food Desert Model.
+
+```{r}
+pct <- quantile(us_vehs %>%
+                  filter(!is.na(PCT_HUNV)) %>%
+                  pull(PCT_HUNV), 0.8)
+
+comp <- app_fara %>%
+    mutate(pct_lahalf = as.numeric(as.character(lapophalf))/Pop2010) %>%
+    mutate(la_half = ifelse(pct_lahalf >= 0.33, 1, 
+                     ifelse(as.numeric(as.character(lapophalf)) >= 500, 1, 0))) %>%
+    filter(TOT_POP != 0) %>%
+    group_by(RURAL) %>%
+    summarize(Total = n(),
+              FAS_12 = sum(Large_Dist > 0.5, na.rm=T),
+              FAS_9 = sum(MHI <= 0.8, na.rm=T),
+              FAS_6 = sum(PCT_HUNV >= pct, na.rm=T), 
+              FAS_3 = sum(FAS1_Cat == "POOR", na.rm=T),
+              FDM_11 = sum(la_half == 1, na.rm=T),
+              FDM_8 = sum(LowIncomeTracts == 1, na.rm=T),
+              FDM_5 = sum(HUNVFlag == 1, na.rm=T),
+              FDM_2 = sum(LILATracts_Vehicle == 1, na.rm=T),
+              Both_10 = sum(Large_Dist > 0.5 & la_half == 1, na.rm=T),
+              Both_7 = sum(MHI <= 0.8 & LowIncomeTracts == 1, na.rm=T),
+              Both_4 = sum(PCT_HUNV >= pct & HUNVFlag == 1, na.rm=T),
+              Both_1 = sum(FAS1_Cat == "POOR" & LILATracts_Vehicle == 1, na.rm=T)) %>%
+  pivot_longer(cols=-c(RURAL, Total), names_to="Factor", values_to="Tracts") %>%
+  mutate(Label = sapply(strsplit(Factor,"_"), `[`, 1),
+         Position = as.numeric(sapply(strsplit(Factor,"_"), `[`, 2))) %>%
+  arrange(Position)
+
+fig5 <- ggplot(comp %>%
+         mutate(VPOS = ifelse(RURAL == "Urban", -0.25, 1.25))) +
+  geom_bar(aes(x=Position, y=Tracts/Total*100, fill= RURAL), stat="identity", width=0.75, position="dodge") +
+  geom_text(aes(x=Position, y=-1, label=Label), hjust=1, size=3, color="grey25") +
+  geom_text(aes(x=Position, y=(Tracts/Total*100)+1, label=Tracts, vjust=VPOS), hjust=0, size=3, color="grey25") +
+  geom_vline(aes(xintercept=3.5), lwd=0.25) +
+  geom_vline(aes(xintercept=6.5), lwd=0.25) +
+  geom_vline(aes(xintercept=9.5), lwd=0.25) +
+  coord_flip() +
+  theme_bw() +
+  scale_x_continuous(breaks = c(2, 5, 8, 11), labels = c("Food Desert/\nPoor Access\nClassifications", "Vehicle","Economic", "Distance-\nto-store")) +
+  scale_y_continuous(limits=c(-5, 105), breaks = c(0, 25, 50, 75, 100), labels = c("0%", "25%", "50%", "75%", "100%")) +
+  labs(fill="",
+       x="",
+       y="Percent of Rural or Urban Tracts") +
+  scale_fill_manual(values=c("#31a354", "grey75")) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(legend.position="bottom")
+
+ggsave(plot=fig5, filename="./Visualizations/Figure5.jpg", width=6.5, height=5, units="in")
+```
+
+# SI Figures
+
+**SI Figure 1**: Indicator of access and raw Food Access Score maps
+
+```{r}
+dist <- ggplot(score %>%
+                filter(!is.na(FAS1)) %>%
+                mutate(Groc_plot = cut(Large_Dist,
+                                       breaks = c(0, 0.5, 1, 5, 10, 25),
+                                       labels = c("< 0.5 miles", "0.5 to 1 mile", "1 to 5 miles", "5 to 10 miles", "> 10 miles"),
+                                       include.lowest=T))) +
+  geom_sf(aes(fill=Groc_plot), color="transparent", lwd=0) +
+  geom_sf(data=app_state, fill="transparent", color="grey45", lwd=0.25) +
+  scale_fill_brewer(palette="Blues") +
+  theme_void() +
+  labs(fill="", title="A.") +
+  theme(legend.position = c(0.95, 0.25))
+
+
+mhi <- ggplot(score %>%
+                filter(!is.na(FAS1)) %>%
+                mutate(MHI_plot = cut(MHI,
+                                      breaks = c(0, 0.65, 0.85, 1, 1.45, 3),
+                                      labels = c("< 0.65", "0.65 to 0.85", "0.85 to 1.00", "1.00 to 1.45", "> 1.45"),
+                                      include.lowest=T))) +
+  geom_sf(aes(fill=MHI_plot), color="transparent", lwd=0) +
+  geom_sf(data=app_state, fill="transparent", color="grey45", lwd=0.25) +
+  scale_fill_brewer(palette="Reds", na.value="grey50") +
+  theme_void() +
+  labs(fill="", title="B.") +
+  theme(legend.position = c(0.95, 0.25))
+
+vehs <- ggplot(score %>%
+                filter(!is.na(FAS1)) %>%
+                mutate(Vehs_plot = cut(PCT_HUNV,
+                                       breaks = c(0, 2.5, 5, 10, 25, 100),
+                                       labels = c("< 2.5%", "2.5% to 5%", "5% to 10%", "10% to 25%", "> 25%"),
+                                       include.lowest=T))) +
+  geom_sf(aes(fill=Vehs_plot), color="transparent", lwd=0) +
+  geom_sf(data=app_state, fill="transparent", color="grey45", lwd=0.25) +
+  scale_fill_brewer(palette = "Greys", na.value="grey50") +
+  theme_void() +
+  labs(fill="", title="C.") +
+  theme(legend.position = c(0.95, 0.25))
+
+fas <- ggplot(score %>%
+                filter(!is.na(FAS1))) +
+  geom_sf(aes(fill=FAS1), color="transparent", lwd=0) +
+  geom_sf(data=app_state, fill="transparent", color="grey45", lwd=0.25) +
+  scale_fill_gradient2(high="#5e3c99", mid="#f7f7f7", low="#e66101", midpoint=0, na.value="grey50", limits=c(-9.15, 9.15)) +
+  theme_void() +
+  labs(fill="", title="D.") +
+  theme(legend.position = c(0.95, 0.25))
+
+SIfig1 <- ggarrange(dist, mhi, vehs, fas, nrow=2, ncol=2)
+
+ggsave(plot=SIfig1, filename = "./Visualizations/SI_Figure1.jpg", width=8, height=8, units="in")
+```
+
+**SI Figure 2**: Indicator of access and raw Food Access Score histograms, for all, rural, and urban tracts
+
+```{r}
+disth <- ggplot(rbind(score %>% filter(!is.na(FAS1)), 
+                      score %>% filter(!is.na(FAS1)) %>%
+                        mutate(RURAL = "All Tracts"))) +
+  geom_histogram(aes(fill=RURAL, x=Large_Dist), color="transparent", lwd=0, show.legend = F) +
+  facet_wrap(vars(RURAL), ncol=1) +
+  scale_fill_manual(values=c("black", "#31a354", "grey75")) +
+  theme_bw() +
+  theme(axis.text.y = element_text(angle=45)) +
+  labs(fill="", 
+       title="A.", 
+       x="Distance (miles)",
+       y="")
+
+mhih <- ggplot(rbind(score %>% filter(!is.na(FAS1)), 
+                      score %>% filter(!is.na(FAS1)) %>%
+                        mutate(RURAL = "All Tracts"))) +
+  geom_histogram(aes(fill=RURAL, x=MHI), color="transparent", lwd=0, show.legend = F) +
+  facet_wrap(vars(RURAL), ncol=1) +
+  scale_fill_manual(values=c("black", "#31a354", "grey75")) +
+  theme_bw() +
+  theme(axis.text.y = element_text(angle=45)) +
+  labs(fill="", 
+       title="B.", 
+       x="MHI Proportion",
+       y="")
+
+vehsh <- ggplot(rbind(score %>% filter(!is.na(FAS1)), 
+                      score %>% filter(!is.na(FAS1)) %>%
+                        mutate(RURAL = "All Tracts"))) +
+  geom_histogram(aes(fill=RURAL, x=PCT_HUNV), color="transparent", lwd=0, show.legend = F) +
+  facet_wrap(vars(RURAL), ncol=1) +
+  scale_fill_manual(values=c("black", "#31a354", "grey75")) +
+  theme_bw() +
+  theme(axis.text.y = element_text(angle=45)) +
+  labs(fill="", 
+       title="C.", 
+       x="Households (%)",
+       y="")
+
+fash <- ggplot(rbind(score %>% filter(!is.na(FAS1)), 
+                      score %>% filter(!is.na(FAS1)) %>%
+                        mutate(RURAL = "All Tracts"))) +
+  geom_histogram(aes(fill=RURAL, x=FAS1), color="transparent", lwd=0, show.legend = F) +
+  facet_wrap(vars(RURAL), ncol=1) +
+  scale_fill_manual(values=c("black", "#31a354", "grey75")) +
+  theme_bw() +
+  theme(axis.text.y = element_text(angle=45)) +
+  labs(fill="", 
+       title="D.", 
+       x="Food Access Score",
+       y="")
+
+SIfig2 <- ggarrange(disth, mhih, vehsh, fash, nrow=1, ncol=4)
+
+ggsave(plot=SIfig2, filename = "./Visualizations/SI_Figure2.jpg", width=8, height=4, units="in")
+```

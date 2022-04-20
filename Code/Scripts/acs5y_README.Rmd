@@ -1,0 +1,78 @@
+---
+title: "acs5y_README"
+author: "Jared Gingrich"
+date: "9/17/2021"
+output: html_document
+---
+
+acs5y: an R interface with the American Community Survey FTP
+---
+
+```{r echo=F, warning=F, message=F}
+source("./acs5y.R", local = knitr::knit_global())
+library(tidyverse)
+```
+
+The R script `acs5y.R` is designed to pull American Community Survey data tables from the File Transfer Protocol site, specifically handling the 5-year estimates.^[Because this script pulls large data files from the ACS FTP, it can take a while to run] At present, the script works for all years of published 5-year estimate data, up through the 2015-2019 ACS. 
+
+`acs5y` also includes settings to list the available ACS 5-year data tables, either the names of all the data tables or the headers contained within a specific table.
+
+---
+
+Usage
+---
+
+The primary function of this script is to return a `data.frame` with data from a specific ACS table. 
+
+```{r eval=F}
+acs5y(year = NULL, state = NULL, cenunit = NULL, table = NULL, error = FALSE, list_files = FALSE)
+```
+
+Here is an example with general inputs, using ACS table B01003 (Total Population):
+
+```{r warning=F, message=F}
+head(acs5y(year = 2019, state = "California", cenunit = "County", table = "B01003"))
+```
+
+The default script, with no inputs, returns the list of ACS data tables in the most recent ACS year (2019):
+
+```{r warning=F, message=F}
+acs5y()
+```
+
+The listing a specific ACS data table, with other default inputs, pulls the details of that table.
+
+```{r warning=F, message=F}
+acs5y(table = "B01001")
+```
+
+Arguments
+---
+
+`year`: ACS data year. Corresponds to the latest year in the ACS 5-year estimate. Ex. `year = 2015` pulls data from the 2011-2015 ACS. If other inputs are left at default, this returns the list of ACS data tables in specified ACS year.
+
+`state`: US State.^[Functionality for US Territories is not yet tested.] 
+
+`cenunit`: Census unit. Geographic divisions on which the data can be grouped. Current census units shown below:
+
+```{r message=F, warning = F, echo=F}
+sumlevel <- data.frame(SUMLEVEL = c("020","030","040","050","060","067","140","150","160","170","230","250","251","252","254","310","314","330","335","350","355","500","610","620","860","950","960","970"),
+                       DESC = c("Region", "Division", "State", "State-County", "State-County-County Subdivision", "State-County-County Subdivision-Subminor Civil Division", "State-County-Census Tract", "State-County-Census Tract-Block Group", "State-Place", "State-Consolidated City", "State-Alaska Native Regional Corporation", "American Indian Area/Alaska Native Area/Hawaiian Home Land", "American Indian Area-Tribal Subdivision/Remainder", "American Indian Area/Alaska Native Area (Reservation or Statistical Entity Only)", "American Indian Area (Off-Reservation Trust Land Only)/Hawaiian Home Land", "Metropolitan Statistical Area/Micropolitan Statistical Area", "Metropolitan Statistical Area-Metropolitan Division", "Combined Statistical Area", "Combined New England City and Town Area", "New England City and Town Area", "New England City and Town Area (NECTA)-NECTA Division", "Current Congressional District", "State-State Legislative District (Upper Chamber)", "State-State Legislative District (Lower Chamber)", "5-Digit ZIP code Tabulation Area", "State-School District (Elementary)/Remainder", "State-School District (Secondary)/Remainder", "State-School District (Unified)/Remainder"),
+                       ABBR = c("REGION", "DIVISION", "STATE", "COUNTY", "COUSUB", "SUBMCD", "TRACT", "BLKGRP", "PLACE", "CONCIT", "ANRC", "AIANHH", "AITSCE", "AITS", "AIHHTLI", "CBSA", "METDIV", "CSA", "CNECTA", "NECTA", "NECTADIV", "CDCURR", "SLDU","SLDL", "ZCTA5", "SDELM", "SDSEC", "SDUNI")) %>%
+  mutate(across(where(is.factor), as.character)) %>%
+  mutate(ABBR = tolower(ABBR))
+```
+
+```{r results='asis', echo=F}
+for(i in 1:nrow(sumlevel)){
+  cat("\n")
+  cat("*", paste0("`", sumlevel$ABBR[i], "`"), ": ", sumlevel$DESC[i], "- [Summary Level Code ", sumlevel$SUMLEVEL[i], "](https://www.census.gov/programs-surveys/geography/technical-documentation/naming-convention/cartographic-boundary-file/carto-boundary-summary-level.html)")
+  cat("\n\n")
+}
+```
+
+`table`: Specifies an ACS table from which to pull data. Used in conjunction with `list_files = TRUE` or other inputs left at default, calls the detailed data contained within the ACS table.
+
+`error`: If `error = TRUE`, pulls the margin of error values for the specified data table instead of the data estimates.
+
+`list_files`: If `list_files = TRUE`, manually calls the list of ACS data tables. Used in conjunction with a specified `table`, calls the detailed data contained within the ACS table.
